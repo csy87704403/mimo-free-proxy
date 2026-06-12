@@ -19,6 +19,12 @@ Set your private key in `.env`:
 PROXY_API_KEY=replace-with-your-private-key
 ```
 
+If native `mimo` already works well on the VPS, reuse its free-channel client id:
+
+```bash
+grep '^MIMO_CLIENT=' .env >/dev/null || echo "MIMO_CLIENT=$(cat ~/.local/share/mimocode/mimo-free-client)" >> .env
+```
+
 Start the service:
 
 ```bash

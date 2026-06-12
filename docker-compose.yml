@@ -12,6 +12,7 @@ services:
       UPSTREAM_BASE: ${UPSTREAM_BASE:-https://api.xiaomimimo.com}
       MAX_429_WAIT_MS: ${MAX_429_WAIT_MS:-180000}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-mimo-auto}
+      MIMO_CLIENT: ${MIMO_CLIENT:-}
       CLIENT_FILE: ${CLIENT_FILE:-/data/client}
       GOMEMLIMIT: ${GOMEMLIMIT:-24MiB}
       GOGC: ${GOGC:-50}
