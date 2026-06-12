@@ -4,10 +4,12 @@ WORKDIR /src
 COPY go.mod ./
 COPY main.go ./
 
+RUN apk add --no-cache ca-certificates
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mimo-free-proxy .
 
 FROM scratch
 
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/mimo-free-proxy /mimo-free-proxy
 
 ENV HOST=0.0.0.0
