@@ -221,36 +221,55 @@ func (s *server) bootstrapJWT(ctx context.Context, force bool) (string, error) {
 	}
 
 	payload, _ := json.Marshal(map[string]string{"client": s.clientID})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.upstreamBase+"/api/free-ai/bootstrap", bytes.NewReader(payload))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
+	started := time.Now()
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.upstreamBase+"/api/free-ai/bootstrap", bytes.NewReader(payload))
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Content-Type", "application/json")
 
-	text, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("bootstrap failed %d: %s", resp.StatusCode, string(text))
-	}
+		resp, err := s.client.Do(req)
+		if err != nil {
+			return "", err
+		}
 
-	var out struct {
-		JWT string `json:"jwt"`
-	}
-	if err := json.Unmarshal(text, &out); err != nil {
-		return "", err
-	}
-	if out.JWT == "" {
-		return "", errors.New("bootstrap response missing jwt")
-	}
+		text, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
 
-	s.jwt = out.JWT
-	s.jwtExp = jwtExp(out.JWT)
-	return s.jwt, nil
+		if resp.StatusCode == http.StatusTooManyRequests {
+			delay := retryDelay(resp.Header.Get("Retry-After"), attempt)
+			if time.Since(started)+delay > s.cfg.max429Wait {
+				return "", fmt.Errorf("bootstrap failed %d: %s", resp.StatusCode, string(text))
+			}
+			log.Printf("bootstrap got 429, waiting %s before retry", delay.Round(time.Second))
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(delay):
+			}
+			continue
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return "", fmt.Errorf("bootstrap failed %d: %s", resp.StatusCode, string(text))
+		}
+
+		var out struct {
+			JWT string `json:"jwt"`
+		}
+		if err := json.Unmarshal(text, &out); err != nil {
+			return "", err
+		}
+		if out.JWT == "" {
+			return "", errors.New("bootstrap response missing jwt")
+		}
+
+		s.jwt = out.JWT
+		s.jwtExp = jwtExp(out.JWT)
+		return s.jwt, nil
+	}
 }
 
 func normalizeChatBody(body []byte, defaultModel string, allowCustom bool) ([]byte, error) {
