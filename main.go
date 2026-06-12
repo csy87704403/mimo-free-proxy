@@ -29,6 +29,7 @@ type config struct {
 	port           string
 	proxyAPIKey    string
 	upstreamBase   string
+	upstreamUA     string
 	defaultModel   string
 	max429Wait     time.Duration
 	allowCustom    bool
@@ -83,6 +84,7 @@ func loadConfig() config {
 		port:           env("PORT", "39173"),
 		proxyAPIKey:    os.Getenv("PROXY_API_KEY"),
 		upstreamBase:   strings.TrimRight(env("UPSTREAM_BASE", "https://api.xiaomimimo.com"), "/"),
+		upstreamUA:     env("UPSTREAM_USER_AGENT", "Bun/1.3.14"),
 		defaultModel:   env("DEFAULT_MODEL", "mimo-auto"),
 		max429Wait:     durationMs(env("MAX_429_WAIT_MS", "180000")),
 		allowCustom:    os.Getenv("ALLOW_CUSTOM_MODEL") == "1",
@@ -209,6 +211,7 @@ func (s *server) postChat(ctx context.Context, jwt string, body []byte) (*http.R
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("X-Mimo-Source", "mimocode-cli-free")
+	req.Header.Set("User-Agent", s.cfg.upstreamUA)
 	return s.client.Do(req)
 }
 
@@ -229,6 +232,8 @@ func (s *server) bootstrapJWT(ctx context.Context, force bool) (string, error) {
 			return "", err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("User-Agent", s.cfg.upstreamUA)
 
 		resp, err := s.client.Do(req)
 		if err != nil {

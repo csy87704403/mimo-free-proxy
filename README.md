@@ -19,6 +19,12 @@ Set your private key in `.env`:
 PROXY_API_KEY=replace-with-your-private-key
 ```
 
+The proxy defaults to a Bun-like upstream user agent to match native mimocode more closely:
+
+```text
+UPSTREAM_USER_AGENT=Bun/1.3.14
+```
+
 If native `mimo` already works well on the VPS, reuse its free-channel client id:
 
 ```bash
