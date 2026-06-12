@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -57,7 +58,9 @@ func main() {
 		client: &http.Client{
 			Timeout: 0,
 			Transport: &http.Transport{
-				Proxy: http.ProxyFromEnvironment,
+				Proxy:             http.ProxyFromEnvironment,
+				ForceAttemptHTTP2: false,
+				TLSNextProto:      map[string]func(string, *tls.Conn) http.RoundTripper{},
 			},
 		},
 	}
