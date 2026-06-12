@@ -11,6 +11,18 @@ const PROXY_API_KEY = process.env.PROXY_API_KEY || "";
 const UPSTREAM_BASE = (process.env.UPSTREAM_BASE || "https://api.xiaomimimo.com").replace(/\/+$/, "");
 const MAX_429_WAIT_MS = Number(process.env.MAX_429_WAIT_MS || 180_000);
 const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "mimo-auto";
+const BOOTSTRAP_USER_AGENT = "mimocode/0.1.0";
+const CHAT_USER_AGENT = "mimocode/0.1.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14";
+const REQUIRED_SYSTEM_MESSAGES = [
+  {
+    role: "system",
+    content: "You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks.",
+  },
+  {
+    role: "system",
+    content: "# Memory system",
+  },
+];
 
 if (!PROXY_API_KEY) {
   console.error("PROXY_API_KEY is required. Refusing to start an open proxy.");
@@ -125,7 +137,11 @@ async function bootstrapJwt(force = false) {
     for (let attempt = 0; ; attempt++) {
       const resp = await fetch(`${UPSTREAM_BASE}/api/free-ai/bootstrap`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          accept: "*/*",
+          "user-agent": BOOTSTRAP_USER_AGENT,
+        },
         body: JSON.stringify({ client: stableClient() }),
       });
       const text = await resp.text();
@@ -180,9 +196,11 @@ function backoffMs(attempt) {
 function proxyHeaders(jwt) {
   return {
     "content-type": "application/json",
-    accept: "application/json",
+    accept: "*/*",
     authorization: `Bearer ${jwt}`,
     "x-mimo-source": "mimocode-cli-free",
+    "x-session-affinity": `ses_${crypto.randomBytes(18).toString("base64url")}`,
+    "user-agent": CHAT_USER_AGENT,
   };
 }
 
@@ -216,6 +234,29 @@ function normalizeChatBody(rawText) {
   body.model = body.model || DEFAULT_MODEL;
   if (body.model !== DEFAULT_MODEL && process.env.ALLOW_CUSTOM_MODEL !== "1") {
     body.model = DEFAULT_MODEL;
+  }
+  body.max_tokens = body.max_tokens || 128000;
+  body.temperature = body.temperature ?? 1;
+  body.messages = Array.isArray(body.messages) ? body.messages : [];
+  const hasMimoSystem = body.messages.some(
+    (message) =>
+      message?.role === "system" &&
+      typeof message.content === "string" &&
+      message.content.includes("You are MiMoCode"),
+  );
+  const hasMemorySystem = body.messages.some(
+    (message) =>
+      message?.role === "system" &&
+      typeof message.content === "string" &&
+      message.content.includes("# Memory system"),
+  );
+  body.messages = [
+    ...(!hasMimoSystem ? [REQUIRED_SYSTEM_MESSAGES[0]] : []),
+    ...(!hasMemorySystem ? [REQUIRED_SYSTEM_MESSAGES[1]] : []),
+    ...body.messages,
+  ];
+  if (body.stream && !body.stream_options) {
+    body.stream_options = { include_usage: true };
   }
   return JSON.stringify(body);
 }
