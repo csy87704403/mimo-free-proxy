@@ -1,8 +1,56 @@
 # mimo-free-proxy
 
-OpenAI-compatible proxy for the MiMo free channel. The default Docker image runs a low-overhead Python stdlib server, without Flask/FastAPI/requests.
+OpenAI-compatible proxy for the MiMo free channel.
+
+The recommended deployment is the host-level Node.js service. This avoids Docker networking/runtime differences and stays closest to the native mimocode environment.
+
+## Host Run
+
+```bash
+cd /opt
+git clone https://github.com/csy87704403/mimo-free-proxy.git
+cd /opt/mimo-free-proxy
+
+cat > /etc/mimo-free-proxy.env <<'EOF'
+HOST=0.0.0.0
+PORT=39173
+PROXY_API_KEY=replace-with-your-private-key
+UPSTREAM_BASE=https://api.xiaomimimo.com
+MAX_429_WAIT_MS=180000
+DEFAULT_MODEL=mimo-auto
+EOF
+
+cp /opt/mimo-free-proxy/mimo-free-proxy.service.example /etc/systemd/system/mimo-free-proxy.service
+
+systemctl daemon-reload
+systemctl enable mimo-free-proxy
+systemctl start mimo-free-proxy
+systemctl status mimo-free-proxy --no-pager
+```
+
+If `ufw` is enabled:
+
+```bash
+ufw allow 39173/tcp
+```
+
+## Host Update
+
+```bash
+cd /opt/mimo-free-proxy
+git pull
+systemctl restart mimo-free-proxy
+```
+
+## Host Logs
+
+```bash
+journalctl -u mimo-free-proxy -f
+```
 
 ## Docker Run
+
+Docker files are kept for experiments, but Docker is not the recommended path for this proxy.
 
 ```bash
 cd /opt
@@ -75,17 +123,26 @@ docker compose up -d --build
 
 ## Memory
 
-The Python container avoids web frameworks and third-party dependencies. Typical idle RSS should be far below the old Node.js version, usually in the low tens of MB depending on kernel and Docker accounting. The Docker image sets:
-
-```text
-PYTHONUNBUFFERED=1
-PYTHONDONTWRITEBYTECODE=1
-MALLOC_ARENA_MAX=1
-```
+The host-level Node.js service typically uses more memory than the Go/Python experiments, but it avoids Docker request-path differences.
 
 Actual memory depends on Docker, kernel accounting, request size, and concurrent requests.
 
 ## Uninstall
+
+Host-level service:
+
+```bash
+systemctl stop mimo-free-proxy
+systemctl disable mimo-free-proxy
+
+rm -f /etc/systemd/system/mimo-free-proxy.service
+rm -f /etc/mimo-free-proxy.env
+
+systemctl daemon-reload
+systemctl reset-failed
+```
+
+Docker experiment:
 
 ```bash
 cd /opt/mimo-free-proxy
