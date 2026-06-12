@@ -4,3 +4,6 @@ node_modules/
 mimo-free-proxy
 mimo-free-proxy.exe
 local-test-client.txt
+py-local-test-client.txt
+py-local-test-jwt.txt
+__pycache__/

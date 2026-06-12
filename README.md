@@ -1,6 +1,6 @@
 # mimo-free-proxy
 
-OpenAI-compatible proxy for the MiMo free channel. The default implementation is a small Go binary packaged with Docker.
+OpenAI-compatible proxy for the MiMo free channel. The default Docker image runs a low-overhead Python stdlib server, without Flask/FastAPI/requests.
 
 ## Docker Run
 
@@ -19,10 +19,10 @@ Set your private key in `.env`:
 PROXY_API_KEY=replace-with-your-private-key
 ```
 
-The proxy defaults to a Bun-like upstream user agent to match native mimocode more closely:
+The proxy defaults to a Python urllib upstream user agent:
 
 ```text
-UPSTREAM_USER_AGENT=Bun/1.3.14
+UPSTREAM_USER_AGENT=Python-urllib/3
 ```
 
 If native `mimo` already works well on the VPS, reuse its free-channel client id:
@@ -75,11 +75,12 @@ docker compose up -d --build
 
 ## Memory
 
-The Go container is designed to stay small. Typical idle RSS should be much lower than the old Node.js version. The Docker image sets:
+The Python container avoids web frameworks and third-party dependencies. Typical idle RSS should be far below the old Node.js version, usually in the low tens of MB depending on kernel and Docker accounting. The Docker image sets:
 
 ```text
-GOMEMLIMIT=24MiB
-GOGC=50
+PYTHONUNBUFFERED=1
+PYTHONDONTWRITEBYTECODE=1
+MALLOC_ARENA_MAX=1
 ```
 
 Actual memory depends on Docker, kernel accounting, request size, and concurrent requests.
