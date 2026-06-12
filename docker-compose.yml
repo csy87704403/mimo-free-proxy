@@ -1,0 +1,22 @@
+services:
+  mimo-free-proxy:
+    build: .
+    container_name: mimo-free-proxy
+    restart: unless-stopped
+    ports:
+      - "39173:39173"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 39173
+      PROXY_API_KEY: replace-with-your-private-key
+      UPSTREAM_BASE: https://api.xiaomimimo.com
+      MAX_429_WAIT_MS: 180000
+      DEFAULT_MODEL: mimo-auto
+      CLIENT_FILE: /data/client
+      GOMEMLIMIT: 24MiB
+      GOGC: 50
+    volumes:
+      - mimo-free-proxy-data:/data
+
+volumes:
+  mimo-free-proxy-data:

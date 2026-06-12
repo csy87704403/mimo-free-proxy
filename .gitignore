@@ -1,3 +1,6 @@
 *.log
 .env
 node_modules/
+mimo-free-proxy
+mimo-free-proxy.exe
+local-test-client.txt

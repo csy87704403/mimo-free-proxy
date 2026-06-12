@@ -1,29 +1,29 @@
 # mimo-free-proxy
 
-OpenAI-compatible proxy for the MiMo free channel.
+OpenAI-compatible proxy for the MiMo free channel. The default implementation is a small Go binary packaged with Docker.
 
-## Run On VPS
+## Docker Run
 
 ```bash
 cd /opt
 git clone https://github.com/csy87704403/mimo-free-proxy.git
 cd /opt/mimo-free-proxy
 
-cat > /etc/mimo-free-proxy.env <<'EOF'
-HOST=0.0.0.0
-PORT=39173
+cp .env.example .env
+nano .env
+```
+
+Set your private key in `.env`:
+
+```text
 PROXY_API_KEY=replace-with-your-private-key
-UPSTREAM_BASE=https://api.xiaomimimo.com
-MAX_429_WAIT_MS=180000
-DEFAULT_MODEL=mimo-auto
-EOF
+```
 
-cp /opt/mimo-free-proxy/mimo-free-proxy.service.example /etc/systemd/system/mimo-free-proxy.service
+Start the service:
 
-systemctl daemon-reload
-systemctl enable mimo-free-proxy
-systemctl start mimo-free-proxy
-systemctl status mimo-free-proxy --no-pager
+```bash
+docker compose up -d --build
+docker compose ps
 ```
 
 If `ufw` is enabled:
@@ -40,7 +40,7 @@ curl http://127.0.0.1:39173/health
 curl http://127.0.0.1:39173/v1/chat/completions \
   -H "Authorization: Bearer replace-with-your-private-key" \
   -H "Content-Type: application/json" \
-  -d '{"model":"mimo-auto","messages":[{"role":"user","content":"你好"}],"stream":false}'
+  -d '{"model":"mimo-auto","messages":[{"role":"user","content":"hello"}],"stream":false}'
 ```
 
 Client config:
@@ -51,18 +51,30 @@ API Key: replace-with-your-private-key
 Model: mimo-auto
 ```
 
+## Update
+
+```bash
+cd /opt/mimo-free-proxy
+git pull
+docker compose up -d --build
+```
+
+## Memory
+
+The Go container is designed to stay small. Typical idle RSS should be much lower than the old Node.js version. The Docker image sets:
+
+```text
+GOMEMLIMIT=24MiB
+GOGC=50
+```
+
+Actual memory depends on Docker, kernel accounting, request size, and concurrent requests.
+
 ## Uninstall
 
 ```bash
-systemctl stop mimo-free-proxy
-systemctl disable mimo-free-proxy
-
-rm -f /etc/systemd/system/mimo-free-proxy.service
-rm -f /etc/mimo-free-proxy.env
-rm -rf /opt/mimo-free-proxy
-
-systemctl daemon-reload
-systemctl reset-failed
+cd /opt/mimo-free-proxy
+docker compose down -v
 ```
 
 If `ufw` was used to open the port:
@@ -71,9 +83,14 @@ If `ufw` was used to open the port:
 ufw delete allow 39173/tcp
 ```
 
+Remove project files after the service is stopped:
+
+```bash
+rm -rf /opt/mimo-free-proxy
+```
+
 Verify removal:
 
 ```bash
-systemctl status mimo-free-proxy --no-pager
 curl http://127.0.0.1:39173/health
 ```
