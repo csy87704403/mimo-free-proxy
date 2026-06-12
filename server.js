@@ -20,6 +20,7 @@ if (!PROXY_API_KEY) {
 const dataDir = path.join(os.homedir(), ".local", "share", "mimo-free-proxy");
 const preferredClientFile = path.join(os.homedir(), ".local", "share", "mimocode", "mimo-free-client");
 const fallbackClientFile = path.join(dataDir, "client");
+const jwtFile = path.join(dataDir, "jwt");
 
 let cachedJwt = "";
 let cachedJwtExp = 0;
@@ -89,23 +90,63 @@ function jwtExp(jwt) {
   return Date.now() + 30 * 60_000;
 }
 
+function readCachedJwt() {
+  if (cachedJwt && cachedJwtExp - Date.now() > 5 * 60_000) return cachedJwt;
+  try {
+    const value = fs.readFileSync(jwtFile, "utf8").trim();
+    const exp = jwtExp(value);
+    if (value && exp - Date.now() > 5 * 60_000) {
+      cachedJwt = value;
+      cachedJwtExp = exp;
+      return cachedJwt;
+    }
+  } catch {}
+  return "";
+}
+
+function writeCachedJwt(jwt) {
+  try {
+    ensureDir(dataDir);
+    fs.writeFileSync(jwtFile, jwt, { mode: 0o600 });
+  } catch (error) {
+    console.error(`could not persist jwt cache: ${error?.message || error}`);
+  }
+}
+
 async function bootstrapJwt(force = false) {
-  if (!force && cachedJwt && cachedJwtExp - Date.now() > 5 * 60_000) return cachedJwt;
+  if (!force) {
+    const cached = readCachedJwt();
+    if (cached) return cached;
+  }
   if (!force && bootstrapping) return bootstrapping;
 
   bootstrapping = (async () => {
-    const resp = await fetch(`${UPSTREAM_BASE}/api/free-ai/bootstrap`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ client: stableClient() }),
-    });
-    const text = await resp.text();
-    if (!resp.ok) throw new Error(`bootstrap failed ${resp.status}: ${text.slice(0, 500)}`);
-    const data = JSON.parse(text);
-    if (!data.jwt) throw new Error("bootstrap response missing jwt");
-    cachedJwt = data.jwt;
-    cachedJwtExp = jwtExp(cachedJwt);
-    return cachedJwt;
+    const started = Date.now();
+    for (let attempt = 0; ; attempt++) {
+      const resp = await fetch(`${UPSTREAM_BASE}/api/free-ai/bootstrap`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ client: stableClient() }),
+      });
+      const text = await resp.text();
+      if (resp.ok) {
+        const data = JSON.parse(text);
+        if (!data.jwt) throw new Error("bootstrap response missing jwt");
+        cachedJwt = data.jwt;
+        cachedJwtExp = jwtExp(cachedJwt);
+        writeCachedJwt(cachedJwt);
+        return cachedJwt;
+      }
+
+      if (resp.status !== 429) throw new Error(`bootstrap failed ${resp.status}: ${text.slice(0, 500)}`);
+
+      const delay = parseRetryAfter(resp.headers.get("retry-after")) ?? backoffMs(attempt);
+      if (Date.now() - started + delay > MAX_429_WAIT_MS) {
+        throw new Error(`bootstrap failed ${resp.status}: ${text.slice(0, 500)}`);
+      }
+      console.error(`bootstrap got 429, waiting ${Math.round(delay / 1000)}s before retry`);
+      await sleep(delay);
+    }
   })();
 
   try {
@@ -131,7 +172,7 @@ function parseRetryAfter(value) {
 }
 
 function backoffMs(attempt) {
-  const steps = [20_000, 45_000, 90_000, 180_000, 300_000];
+  const steps = [3_000, 8_000, 15_000, 30_000, 45_000, 60_000];
   const base = steps[Math.min(attempt, steps.length - 1)];
   return base + Math.floor(base * Math.random() * 0.2);
 }
