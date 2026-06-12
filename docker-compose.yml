@@ -15,6 +15,7 @@ services:
       DEFAULT_MODEL: ${DEFAULT_MODEL:-mimo-auto}
       MIMO_CLIENT: ${MIMO_CLIENT:-}
       CLIENT_FILE: ${CLIENT_FILE:-/data/client}
+      JWT_FILE: ${JWT_FILE:-/data/jwt}
       GOMEMLIMIT: ${GOMEMLIMIT:-24MiB}
       GOGC: ${GOGC:-50}
     volumes:

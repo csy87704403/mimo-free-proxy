@@ -31,6 +31,8 @@ If native `mimo` already works well on the VPS, reuse its free-channel client id
 grep '^MIMO_CLIENT=' .env >/dev/null || echo "MIMO_CLIENT=$(cat ~/.local/share/mimocode/mimo-free-client)" >> .env
 ```
 
+The proxy stores a valid upstream JWT in the Docker volume at `/data/jwt`, so rebuilding the container does not force a new bootstrap every time.
+
 Start the service:
 
 ```bash

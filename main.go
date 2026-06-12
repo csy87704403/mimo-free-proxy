@@ -36,6 +36,7 @@ type config struct {
 	allowCustom    bool
 	clientOverride string
 	clientFile     string
+	jwtFile        string
 }
 
 type server struct {
@@ -93,6 +94,7 @@ func loadConfig() config {
 		allowCustom:    os.Getenv("ALLOW_CUSTOM_MODEL") == "1",
 		clientOverride: os.Getenv("MIMO_CLIENT"),
 		clientFile:     os.Getenv("CLIENT_FILE"),
+		jwtFile:        env("JWT_FILE", "/data/jwt"),
 	}
 }
 
@@ -225,6 +227,13 @@ func (s *server) bootstrapJWT(ctx context.Context, force bool) (string, error) {
 	if !force && s.jwt != "" && time.Until(s.jwtExp) > 5*time.Minute {
 		return s.jwt, nil
 	}
+	if !force {
+		if jwt, exp := s.readCachedJWT(); jwt != "" && time.Until(exp) > 5*time.Minute {
+			s.jwt = jwt
+			s.jwtExp = exp
+			return jwt, nil
+		}
+	}
 
 	payload, _ := json.Marshal(map[string]string{"client": s.clientID})
 
@@ -276,8 +285,31 @@ func (s *server) bootstrapJWT(ctx context.Context, force bool) (string, error) {
 
 		s.jwt = out.JWT
 		s.jwtExp = jwtExp(out.JWT)
+		s.writeCachedJWT(s.jwt)
 		return s.jwt, nil
 	}
+}
+
+func (s *server) readCachedJWT() (string, time.Time) {
+	if s.cfg.jwtFile == "" {
+		return "", time.Time{}
+	}
+	data, err := os.ReadFile(s.cfg.jwtFile)
+	if err != nil {
+		return "", time.Time{}
+	}
+	jwt := strings.TrimSpace(string(data))
+	return jwt, jwtExp(jwt)
+}
+
+func (s *server) writeCachedJWT(jwt string) {
+	if s.cfg.jwtFile == "" || jwt == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(s.cfg.jwtFile), 0700); err != nil {
+		return
+	}
+	_ = os.WriteFile(s.cfg.jwtFile, []byte(jwt), 0600)
 }
 
 func normalizeChatBody(body []byte, defaultModel string, allowCustom bool) ([]byte, error) {
