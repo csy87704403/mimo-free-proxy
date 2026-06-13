@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	crand "crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
@@ -24,13 +25,25 @@ import (
 )
 
 const maxBodyBytes = 20 * 1024 * 1024
+const bootstrapUserAgent = "mimocode/0.1.0"
+const chatUserAgent = "mimocode/0.1.0 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+
+var requiredSystemMessages = []map[string]string{
+	{
+		"role":    "system",
+		"content": "You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks.",
+	},
+	{
+		"role":    "system",
+		"content": "# Memory system",
+	},
+}
 
 type config struct {
 	host           string
 	port           string
 	proxyAPIKey    string
 	upstreamBase   string
-	upstreamUA     string
 	defaultModel   string
 	max429Wait     time.Duration
 	allowCustom    bool
@@ -88,7 +101,6 @@ func loadConfig() config {
 		port:           env("PORT", "39173"),
 		proxyAPIKey:    os.Getenv("PROXY_API_KEY"),
 		upstreamBase:   strings.TrimRight(env("UPSTREAM_BASE", "https://api.xiaomimimo.com"), "/"),
-		upstreamUA:     env("UPSTREAM_USER_AGENT", "Bun/1.3.14"),
 		defaultModel:   env("DEFAULT_MODEL", "mimo-auto"),
 		max429Wait:     durationMs(env("MAX_429_WAIT_MS", "180000")),
 		allowCustom:    os.Getenv("ALLOW_CUSTOM_MODEL") == "1",
@@ -213,10 +225,11 @@ func (s *server) postChat(ctx context.Context, jwt string, body []byte) (*http.R
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("X-Mimo-Source", "mimocode-cli-free")
-	req.Header.Set("User-Agent", s.cfg.upstreamUA)
+	req.Header.Set("X-Session-Affinity", randomSessionAffinity())
+	req.Header.Set("User-Agent", chatUserAgent)
 	return s.client.Do(req)
 }
 
@@ -244,8 +257,8 @@ func (s *server) bootstrapJWT(ctx context.Context, force bool) (string, error) {
 			return "", err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
-		req.Header.Set("User-Agent", s.cfg.upstreamUA)
+		req.Header.Set("Accept", "*/*")
+		req.Header.Set("User-Agent", bootstrapUserAgent)
 
 		resp, err := s.client.Do(req)
 		if err != nil {
@@ -321,6 +334,42 @@ func normalizeChatBody(body []byte, defaultModel string, allowCustom bool) ([]by
 	model, _ := value["model"].(string)
 	if model == "" || !allowCustom {
 		value["model"] = defaultModel
+	}
+	if _, ok := value["max_tokens"]; !ok {
+		value["max_tokens"] = 128000
+	}
+	if _, ok := value["temperature"]; !ok {
+		value["temperature"] = 1
+	}
+	messages, _ := value["messages"].([]any)
+	hasMimoSystem := false
+	hasMemorySystem := false
+	for _, item := range messages {
+		message, ok := item.(map[string]any)
+		if !ok || message["role"] != "system" {
+			continue
+		}
+		content, _ := message["content"].(string)
+		if strings.Contains(content, "You are MiMoCode") {
+			hasMimoSystem = true
+		}
+		if strings.Contains(content, "# Memory system") {
+			hasMemorySystem = true
+		}
+	}
+	normalizedMessages := make([]any, 0, len(messages)+2)
+	if !hasMimoSystem {
+		normalizedMessages = append(normalizedMessages, requiredSystemMessages[0])
+	}
+	if !hasMemorySystem {
+		normalizedMessages = append(normalizedMessages, requiredSystemMessages[1])
+	}
+	normalizedMessages = append(normalizedMessages, messages...)
+	value["messages"] = normalizedMessages
+	if stream, _ := value["stream"].(bool); stream {
+		if _, ok := value["stream_options"]; !ok {
+			value["stream_options"] = map[string]bool{"include_usage": true}
+		}
 	}
 	return json.Marshal(value)
 }
@@ -409,11 +458,19 @@ func retryDelay(value string, attempt int) time.Duration {
 			return delay
 		}
 	}
-	steps := []time.Duration{20 * time.Second, 45 * time.Second, 90 * time.Second, 180 * time.Second, 300 * time.Second}
+	steps := []time.Duration{3 * time.Second, 8 * time.Second, 15 * time.Second, 30 * time.Second, 45 * time.Second, 60 * time.Second}
 	if attempt >= len(steps) {
 		return steps[len(steps)-1]
 	}
 	return steps[attempt]
+}
+
+func randomSessionAffinity() string {
+	data := make([]byte, 18)
+	if _, err := crand.Read(data); err != nil {
+		return "ses_" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	return "ses_" + base64.RawURLEncoding.EncodeToString(data)
 }
 
 func jwtExp(jwt string) time.Time {

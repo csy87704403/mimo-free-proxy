@@ -2,7 +2,13 @@
 
 OpenAI-compatible proxy for the MiMo free channel.
 
-The recommended deployment is the host-level Node.js service. This avoids Docker networking/runtime differences and stays closest to the native mimocode environment.
+The host-level Node.js service is the known-good baseline. The Docker build is a low-memory Go implementation that follows the same native free-channel request shape.
+
+Stable Node fallback tag:
+
+```bash
+git checkout stable-node-20260613
+```
 
 ## Host Run
 
@@ -50,7 +56,7 @@ journalctl -u mimo-free-proxy -f
 
 ## Docker Run
 
-Docker files are kept for experiments, but Docker is not the recommended path for this proxy.
+The Docker image runs the Go proxy and is intended for lower memory usage.
 
 ```bash
 cd /opt
@@ -65,12 +71,6 @@ Set your private key in `.env`:
 
 ```text
 PROXY_API_KEY=replace-with-your-private-key
-```
-
-The proxy defaults to a Python urllib upstream user agent:
-
-```text
-UPSTREAM_USER_AGENT=Python-urllib/3
 ```
 
 If native `mimo` already works well on the VPS, reuse its free-channel client id:
@@ -121,9 +121,20 @@ git pull
 docker compose up -d --build
 ```
 
+## Roll Back
+
+Return to the stable Node baseline:
+
+```bash
+cd /opt/mimo-free-proxy
+git fetch --tags
+git checkout stable-node-20260613
+systemctl restart mimo-free-proxy
+```
+
 ## Memory
 
-The host-level Node.js service typically uses more memory than the Go/Python experiments, but it avoids Docker request-path differences.
+The host-level Node.js service typically uses more memory than the Go Docker build.
 
 Actual memory depends on Docker, kernel accounting, request size, and concurrent requests.
 

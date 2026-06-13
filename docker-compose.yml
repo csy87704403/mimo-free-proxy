@@ -10,7 +10,6 @@ services:
       PORT: ${PORT:-39173}
       PROXY_API_KEY: ${PROXY_API_KEY:?set PROXY_API_KEY in .env}
       UPSTREAM_BASE: ${UPSTREAM_BASE:-https://api.xiaomimimo.com}
-      UPSTREAM_USER_AGENT: ${UPSTREAM_USER_AGENT:-Python-urllib/3}
       MAX_429_WAIT_MS: ${MAX_429_WAIT_MS:-180000}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-mimo-auto}
       MIMO_CLIENT: ${MIMO_CLIENT:-}
@@ -18,9 +17,6 @@ services:
       JWT_FILE: ${JWT_FILE:-/data/jwt}
       GOMEMLIMIT: ${GOMEMLIMIT:-24MiB}
       GOGC: ${GOGC:-50}
-      PYTHONUNBUFFERED: ${PYTHONUNBUFFERED:-1}
-      PYTHONDONTWRITEBYTECODE: ${PYTHONDONTWRITEBYTECODE:-1}
-      MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-1}
     volumes:
       - mimo-free-proxy-data:/data
 
