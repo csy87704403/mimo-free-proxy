@@ -198,3 +198,21 @@ func TestEventScannerHandlesSSE(t *testing.T) {
 		t.Fatal("missing SSE line")
 	}
 }
+
+func TestChildEnvironmentUsesDedicatedProxy(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://old-proxy:8080")
+	env := childEnvironment("http://127.0.0.1:7890")
+	joined := "\n" + strings.Join(env, "\n") + "\n"
+	for _, expected := range []string{
+		"\nHTTP_PROXY=http://127.0.0.1:7890\n",
+		"\nHTTPS_PROXY=http://127.0.0.1:7890\n",
+		"\nNO_PROXY=127.0.0.1,localhost,::1\n",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("missing child environment entry %q", expected)
+		}
+	}
+	if strings.Contains(joined, "old-proxy") {
+		t.Fatal("inherited proxy was not replaced")
+	}
+}

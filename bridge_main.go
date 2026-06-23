@@ -41,6 +41,7 @@ type config struct {
 	mimoPassword  string
 	mimoWorkdir   string
 	mimoConfigDir string
+	mimoProxyURL  string
 	idleTimeout   time.Duration
 	startTimeout  time.Duration
 	internalKey   string
@@ -192,6 +193,7 @@ func loadConfig() config {
 		mimoPassword:  password,
 		mimoWorkdir:   workdir,
 		mimoConfigDir: configDir,
+		mimoProxyURL:  strings.TrimSpace(os.Getenv("MIMO_PROXY_URL")),
 		idleTimeout:   durationEnv("MIMO_IDLE_TIMEOUT", 15*time.Minute),
 		startTimeout:  durationEnv("MIMO_START_TIMEOUT", 25*time.Second),
 		internalKey:   internalKey,
@@ -628,7 +630,7 @@ func (m *manager) startProcess(ctx context.Context) error {
 	cmd := exec.Command(m.cfg.mimoBin, "serve", "--hostname", m.cfg.mimoHost, "--port", m.cfg.mimoPort)
 	prepareChild(cmd)
 	cmd.Dir = m.cfg.mimoWorkdir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(childEnvironment(m.cfg.mimoProxyURL),
 		"BUN_OPTIONS=--smol",
 		"MIMOCODE_SERVER_PASSWORD="+m.cfg.mimoPassword,
 		"XDG_CONFIG_HOME="+m.cfg.mimoConfigDir,
@@ -670,6 +672,33 @@ func (m *manager) startProcess(ctx context.Context) error {
 	}
 	_ = cmd.Process.Kill()
 	return fmt.Errorf("mimo did not become ready within %s", m.cfg.startTimeout)
+}
+
+func childEnvironment(proxyURL string) []string {
+	base := os.Environ()
+	if proxyURL == "" {
+		return base
+	}
+	proxyKeys := map[string]bool{
+		"HTTP_PROXY": true, "HTTPS_PROXY": true, "ALL_PROXY": true, "NO_PROXY": true,
+	}
+	filtered := make([]string, 0, len(base)+8)
+	for _, entry := range base {
+		name, _, _ := strings.Cut(entry, "=")
+		if !proxyKeys[strings.ToUpper(name)] {
+			filtered = append(filtered, entry)
+		}
+	}
+	return append(filtered,
+		"HTTP_PROXY="+proxyURL,
+		"HTTPS_PROXY="+proxyURL,
+		"ALL_PROXY="+proxyURL,
+		"http_proxy="+proxyURL,
+		"https_proxy="+proxyURL,
+		"all_proxy="+proxyURL,
+		"NO_PROXY=127.0.0.1,localhost,::1",
+		"no_proxy=127.0.0.1,localhost,::1",
+	)
 }
 
 func (m *manager) healthy(ctx context.Context) bool {
