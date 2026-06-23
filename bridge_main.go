@@ -220,7 +220,7 @@ func installToolPlugin(configHome string) error {
 	}
 	packagePath := filepath.Join(root, "package.json")
 	if _, err := os.Stat(packagePath); errors.Is(err, os.ErrNotExist) {
-		packageData := []byte("{\n  \"private\": true,\n  \"dependencies\": {\n    \"@mimo-ai/plugin\": \"0.1.1\"\n  }\n}\n")
+		packageData := []byte("{\n  \"private\": true,\n  \"dependencies\": {\n    \"@mimo-ai/plugin\": \"0.1.2\"\n  }\n}\n")
 		if err := os.WriteFile(packagePath, packageData, 0600); err != nil {
 			return err
 		}
