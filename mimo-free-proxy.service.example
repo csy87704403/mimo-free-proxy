@@ -7,9 +7,11 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/mimo-free-proxy
 EnvironmentFile=/etc/mimo-free-proxy.env
-ExecStart=/usr/bin/env node /opt/mimo-free-proxy/server.js
-Restart=always
+ExecStart=/opt/mimo-free-proxy/mimo-free-proxy
+Restart=on-failure
 RestartSec=3
+KillMode=control-group
+TimeoutStopSec=15
 User=root
 
 [Install]
