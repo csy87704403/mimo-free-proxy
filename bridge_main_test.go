@@ -181,6 +181,10 @@ func TestToolContinuation(t *testing.T) {
 	if result.content != "DONE" {
 		t.Fatalf("content=%q", result.content)
 	}
+	updated := append(append([]chatMessage{}, input.Messages...), assistantMessage(result))
+	if got := srv.mgr.session(conversationHash(updated)); got != fake.session {
+		t.Fatalf("continued session mapping=%q", got)
+	}
 }
 
 func TestBuildPromptExternalTools(t *testing.T) {
@@ -199,6 +203,9 @@ func TestBuildPromptExternalTools(t *testing.T) {
 	}
 	if !strings.Contains(prompt["system"].(string), "remote bridge host") {
 		t.Fatal("external execution environment guidance missing from system prompt")
+	}
+	if !strings.Contains(prompt["system"].(string), "use relative paths only") {
+		t.Fatal("relative-path guidance missing from system prompt")
 	}
 }
 

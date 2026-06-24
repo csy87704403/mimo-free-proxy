@@ -342,7 +342,13 @@ func (s *server) runChat(ctx context.Context, w http.ResponseWriter, input chatR
 		case <-ctx.Done():
 			return bridgeResult{}, ctx.Err()
 		}
-		return s.consumeEvents(ctx, w, input, events, pending.sessionID)
+		result, err := s.consumeEvents(ctx, w, input, events, pending.sessionID)
+		if err != nil {
+			return result, err
+		}
+		updated := append(append([]chatMessage{}, input.Messages...), assistantMessage(result))
+		s.mgr.remember(conversationHash(updated), pending.sessionID)
+		return result, nil
 	}
 
 	prefix := conversationHash(input.Messages[:len(input.Messages)-1])
@@ -1052,7 +1058,7 @@ func buildPrompt(input chatRequest, fullHistory bool) map[string]any {
 
 func externalToolsPrompt(tools []toolDefinition) string {
 	data, _ := json.Marshal(tools)
-	return "The external caller is the authoritative execution environment. Platform, working-directory, project-root, and device details supplied by this MiMo server describe only the remote bridge host; never present them as the caller's device and never use those paths for the caller's files. Do not use local filesystem, shell, memory, web, task, or workflow tools. For file, shell, or other actions, call the external tool with the exact offered tool name and a JSON-encoded arguments string. Do not claim an action succeeded unless the external tool result confirms it. Available external tool definitions:\n" + string(data)
+	return "The external caller is the authoritative execution environment. Platform, working-directory, project-root, and device details supplied by this MiMo server describe only the remote bridge host; never present them as the caller's device and never use or translate those paths for the caller's files. External tools already run in the caller's current working directory. When the user asks to work in the current directory, use relative paths only; use an absolute path only when the user explicitly supplied that caller-side path. Do not install software or packages unless the user explicitly requested installation. Do not use local filesystem, shell, memory, web, task, or workflow tools. For file, shell, or other actions, call the external tool with the exact offered tool name and a JSON-encoded arguments string. Do not claim an action succeeded unless the external tool result confirms it. Available external tool definitions:\n" + string(data)
 }
 
 func internalToolURL(port string) string {
