@@ -94,6 +94,7 @@ type pendingTool struct {
 	arguments string
 	result    chan string
 	created   time.Time
+	sent      bool
 }
 
 type manager struct {
@@ -401,6 +402,11 @@ type eventStream struct {
 
 func (e *eventStream) Close() error { return e.resp.Body.Close() }
 
+type eventLine struct {
+	text string
+	err  error
+}
+
 func (s *server) consumeEvents(ctx context.Context, w http.ResponseWriter, input chatRequest, events *eventStream, sessionID string) (bridgeResult, error) {
 	result := bridgeResult{finish: "stop", sessionID: sessionID, usage: map[string]int{}}
 	var sw *streamWriter
@@ -416,9 +422,70 @@ func (s *server) consumeEvents(ctx context.Context, w http.ResponseWriter, input
 	seenParts := map[string]string{}
 	partTypes := map[string]string{}
 	answerStarted := false
+	done := make(chan struct{})
+	defer close(done)
+	lines := make(chan eventLine, 1)
+	go func() {
+		for events.scanner.Scan() {
+			item := eventLine{text: events.scanner.Text()}
+			select {
+			case lines <- item:
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+		select {
+		case lines <- eventLine{err: events.scanner.Err()}:
+		case <-done:
+		case <-ctx.Done():
+		}
+		close(lines)
+	}()
+	var heartbeat <-chan time.Time
+	var ticker *time.Ticker
+	if sw != nil {
+		ticker = time.NewTicker(15 * time.Second)
+		heartbeat = ticker.C
+		defer ticker.Stop()
+	}
+	emitTool := func(pending *pendingTool) (bridgeResult, error) {
+		call := &toolCall{ID: pending.callID, Type: "function", Function: functionCall{Name: pending.name, Arguments: pending.arguments}}
+		result.toolCall = call
+		result.finish = "tool_calls"
+		log.Printf("external tool requested: call=%s name=%s", pending.callID, pending.name)
+		if sw != nil {
+			sw.tool(*call)
+			sw.finish("tool_calls")
+			sw.done()
+		}
+		return result, nil
+	}
 
-	for events.scanner.Scan() {
-		line := events.scanner.Text()
+	for {
+		if pending := s.mgr.takePendingTool(sessionID); pending != nil {
+			return emitTool(pending)
+		}
+		var line string
+		select {
+		case <-ctx.Done():
+			_ = s.mgr.abortSession(context.Background(), sessionID)
+			return result, ctx.Err()
+		case <-s.mgr.pendingSig:
+			continue
+		case <-heartbeat:
+			sw.heartbeat()
+			continue
+		case item, ok := <-lines:
+			if !ok {
+				return result, errors.New("mimo event stream closed before completion")
+			}
+			if item.err != nil {
+				return result, item.err
+			}
+			line = item.text
+		}
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
@@ -485,36 +552,7 @@ func (s *server) consumeEvents(ctx context.Context, w http.ResponseWriter, input
 					}
 				}
 			case "tool":
-				if stringValue(part["tool"]) != "external" {
-					continue
-				}
-				state, _ := part["state"].(map[string]any)
-				status := stringValue(state["status"])
-				if status != "pending" && status != "running" {
-					continue
-				}
-				inputMap, _ := state["input"].(map[string]any)
-				name := stringValue(inputMap["name"])
-				arguments := stringValue(inputMap["arguments"])
-				if name == "" {
-					continue
-				}
-				pending, err := s.mgr.waitPendingTool(ctx, sessionID, name, 2*time.Second)
-				if err != nil {
-					continue
-				}
-				callID := pending.callID
-				call := &toolCall{ID: callID, Type: "function", Function: functionCall{Name: name, Arguments: normalizeArguments(arguments)}}
-				result.toolCall = call
-				answerStarted = true
-				log.Printf("external tool requested: call=%s name=%s", callID, name)
-				result.finish = "tool_calls"
-				if sw != nil {
-					sw.tool(*call)
-					sw.finish("tool_calls")
-					sw.done()
-				}
-				return result, nil
+				continue
 			}
 		case "message.part.delta":
 			if stringValue(props["sessionID"]) != sessionID || !assistantIDs[stringValue(props["messageID"])] {
@@ -562,17 +600,7 @@ func (s *server) consumeEvents(ctx context.Context, w http.ResponseWriter, input
 				return result, fmt.Errorf("mimo session error: %v", props["error"])
 			}
 		}
-		select {
-		case <-ctx.Done():
-			_ = s.mgr.abortSession(context.Background(), sessionID)
-			return result, ctx.Err()
-		default:
-		}
 	}
-	if err := events.scanner.Err(); err != nil {
-		return result, err
-	}
-	return result, errors.New("mimo event stream closed before completion")
 }
 
 func (s *server) writeCompletion(w http.ResponseWriter, input chatRequest, result bridgeResult) {
@@ -617,6 +645,10 @@ func (s *streamWriter) role() {
 
 func (s *streamWriter) text(text string) {
 	s.send([]any{map[string]any{"index": 0, "delta": map[string]any{"content": text}, "finish_reason": nil}}, nil)
+}
+
+func (s *streamWriter) heartbeat() {
+	s.send([]any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": nil}}, nil)
 }
 
 func (s *streamWriter) tool(call toolCall) {
@@ -935,6 +967,9 @@ func (m *manager) waitPending(ctx context.Context, callID string, timeout time.D
 	for {
 		m.mu.Lock()
 		pending := m.pending[callID]
+		if pending != nil {
+			pending.sent = true
+		}
 		m.mu.Unlock()
 		if pending != nil {
 			return pending, nil
@@ -949,30 +984,22 @@ func (m *manager) waitPending(ctx context.Context, callID string, timeout time.D
 	}
 }
 
-func (m *manager) waitPendingTool(ctx context.Context, sessionID, name string, timeout time.Duration) (*pendingTool, error) {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	for {
-		m.mu.Lock()
-		var match *pendingTool
-		for _, pending := range m.pending {
-			if pending.sessionID == sessionID && pending.name == name {
-				match = pending
-				break
-			}
+func (m *manager) takePendingTool(sessionID string) *pendingTool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var match *pendingTool
+	for _, pending := range m.pending {
+		if pending.sessionID != sessionID || pending.sent {
+			continue
 		}
-		m.mu.Unlock()
-		if match != nil {
-			return match, nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-deadline.C:
-			return nil, errors.New("external tool callback did not arrive")
-		case <-m.pendingSig:
+		if match == nil || pending.created.Before(match.created) {
+			match = pending
 		}
 	}
+	if match != nil {
+		match.sent = true
+	}
+	return match
 }
 
 func (s *server) handleInternalTool(w http.ResponseWriter, r *http.Request) {

@@ -187,6 +187,55 @@ func TestToolContinuation(t *testing.T) {
 	}
 }
 
+func TestToolCallbackDoesNotDependOnMimoPartEvent(t *testing.T) {
+	fake := newFakeMimo(t)
+	srv, _ := newBridgeForTest(t, fake)
+	events, err := srv.mgr.openEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		pending := &pendingTool{callID: "call_direct", sessionID: fake.session, name: "bash", arguments: `{"command":"pwd"}`, result: make(chan string, 1), created: time.Now()}
+		srv.mgr.mu.Lock()
+		srv.mgr.pending[pending.callID] = pending
+		srv.mgr.mu.Unlock()
+		select {
+		case srv.mgr.pendingSig <- struct{}{}:
+		default:
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := srv.consumeEvents(ctx, httptest.NewRecorder(), chatRequest{Model: "mimo-auto"}, events, fake.session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.toolCall == nil || result.toolCall.ID != "call_direct" || result.finish != "tool_calls" {
+		t.Fatalf("unexpected tool result: %#v", result)
+	}
+}
+
+func TestParallelToolCallbacksAreTakenInOrder(t *testing.T) {
+	now := time.Now()
+	mgr := &manager{pending: map[string]*pendingTool{
+		"second": {callID: "second", sessionID: "session", created: now.Add(time.Second)},
+		"first":  {callID: "first", sessionID: "session", created: now},
+	}}
+	if got := mgr.takePendingTool("session"); got == nil || got.callID != "first" {
+		t.Fatalf("first callback=%#v", got)
+	}
+	if got := mgr.takePendingTool("session"); got == nil || got.callID != "second" {
+		t.Fatalf("second callback=%#v", got)
+	}
+	if got := mgr.takePendingTool("session"); got != nil {
+		t.Fatalf("callback emitted twice: %#v", got)
+	}
+}
+
 func TestBuildPromptExternalTools(t *testing.T) {
 	content, _ := json.Marshal("run a command")
 	input := chatRequest{
