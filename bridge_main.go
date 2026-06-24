@@ -369,13 +369,20 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		localHealthy = s.mgr.healthy(ctx)
 		cancel()
 	}
+	chatOK := lastChatStatus(status) != "failed"
+	ok := (!status.processRunning || localHealthy) && chatOK
+	overall := "running"
+	if !ok {
+		overall = "degraded"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":             true,
-		"status":         "running",
-		"mimo_state":     mimoState(status, localHealthy),
-		"mimo_running":   status.processRunning,
-		"busy":           status.busy,
-		"uptime_seconds": int(time.Since(s.started).Seconds()),
+		"ok":               ok,
+		"status":           overall,
+		"mimo_state":       mimoState(status, localHealthy),
+		"mimo_running":     status.processRunning,
+		"busy":             status.busy,
+		"last_chat_status": lastChatStatus(status),
+		"uptime_seconds":   int(time.Since(s.started).Seconds()),
 	})
 }
 
@@ -396,7 +403,8 @@ func (s *server) handleHealthDetails(w http.ResponseWriter, r *http.Request) {
 	upstream, _ := network["upstream"].(map[string]any)
 	networkOK := boolValue(proxy["ok"]) && boolValue(upstream["ok"])
 	mimoOK := !status.processRunning || localHealthy
-	ok := networkOK && mimoOK
+	chatOK := lastChatStatus(status) != "failed"
+	ok := networkOK && mimoOK && chatOK
 	overall := "healthy"
 	if !ok {
 		overall = "degraded"
@@ -1147,10 +1155,6 @@ func (m *manager) ensureStarted(ctx context.Context) error {
 		return nil
 	}
 	m.mu.Lock()
-	if m.cmd != nil {
-		m.mu.Unlock()
-		return nil
-	}
 	if m.starting != nil {
 		wait := m.starting
 		m.mu.Unlock()
@@ -1164,6 +1168,18 @@ func (m *manager) ensureStarted(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+	if m.cmd != nil {
+		cmd := m.cmd
+		m.mu.Unlock()
+		if m.waitHealthy(ctx, 2*time.Second) {
+			return nil
+		}
+		log.Printf("mimo process is tracked but unhealthy; restarting it")
+		if err := m.stopUnhealthyProcess(ctx, cmd); err != nil {
+			return err
+		}
+		return m.ensureStarted(ctx)
+	}
 	wait := make(chan struct{})
 	m.starting = wait
 	m.startErr = nil
@@ -1176,6 +1192,53 @@ func (m *manager) ensureStarted(ctx context.Context) error {
 	close(wait)
 	m.mu.Unlock()
 	return err
+}
+
+func (m *manager) waitHealthy(ctx context.Context, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if m.healthy(ctx) {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return false
+}
+
+func (m *manager) stopUnhealthyProcess(ctx context.Context, cmd *exec.Cmd) error {
+	if cmd == nil || cmd.Process == nil {
+		m.mu.Lock()
+		if m.cmd == cmd {
+			m.cmd = nil
+		}
+		m.mu.Unlock()
+		return nil
+	}
+	_ = killChild(cmd)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		stopped := m.cmd != cmd
+		m.mu.Unlock()
+		if stopped {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	m.mu.Lock()
+	if m.cmd == cmd {
+		m.cmd = nil
+	}
+	m.mu.Unlock()
+	return nil
 }
 
 func (m *manager) startProcess(ctx context.Context) error {

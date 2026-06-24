@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -148,6 +149,25 @@ func TestBasicHealthIsPublicAndRedacted(t *testing.T) {
 	}
 	if _, exists := response["network"]; exists || strings.Contains(rec.Body.String(), "exit_ip") {
 		t.Fatalf("basic health exposed network details: %s", rec.Body.String())
+	}
+}
+
+func TestHealthDegradesAfterLatestChatFailure(t *testing.T) {
+	fake := newFakeMimo(t)
+	srv, _ := newBridgeForTest(t, fake)
+	started := time.Now().Add(-10 * time.Millisecond)
+	srv.mgr.recordChatStarted(started)
+	srv.mgr.recordChatFinished(started, errors.New("mimo unavailable"))
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	srv.handleHealth(rec, req)
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["ok"] != false || response["status"] != "degraded" || response["last_chat_status"] != "failed" {
+		t.Fatalf("health=%#v", response)
 	}
 }
 
@@ -534,13 +554,17 @@ func TestInternalToolURLAlwaysUsesLoopback(t *testing.T) {
 	}
 }
 
-func TestEnsureStartedDoesNotDuplicateLiveProcess(t *testing.T) {
+func TestEnsureStartedDoesNotTrustUnhealthyTrackedProcess(t *testing.T) {
 	mgr := &manager{
-		cfg:        config{mimoBin: "definitely-not-a-real-mimo-binary", mimoHost: "127.0.0.1", mimoPort: "1"},
+		cfg:        config{mimoBin: "definitely-not-a-real-mimo-binary", mimoHost: "127.0.0.1", mimoPort: "1", mimoWorkdir: t.TempDir()},
 		httpClient: &http.Client{},
 		cmd:        &exec.Cmd{},
 	}
-	if err := mgr.ensureStarted(context.Background()); err != nil {
-		t.Fatalf("existing process should prevent duplicate start: %v", err)
+	err := mgr.ensureStarted(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "start mimo") {
+		t.Fatalf("unhealthy tracked process was trusted: %v", err)
+	}
+	if mgr.cmd != nil {
+		t.Fatal("stale process state was not cleared")
 	}
 }
