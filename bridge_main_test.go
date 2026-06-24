@@ -72,15 +72,21 @@ func newFakeMimo(t *testing.T) *fakeMimo {
 
 func (f *fakeMimo) emitText(text string) {
 	messageID := "msg_test"
+	partID := "prt_test"
 	f.events <- map[string]any{"type": "message.updated", "properties": map[string]any{"info": map[string]any{
 		"id": messageID, "sessionID": f.session, "role": "assistant", "tokens": map[string]any{"input": 10, "output": len(text)},
 	}}}
-	for _, part := range []string{text[:1], text[1:]} {
-		f.events <- map[string]any{"type": "message.part.updated", "properties": map[string]any{
-			"part":  map[string]any{"id": "prt_test", "sessionID": f.session, "messageID": messageID, "type": "text", "text": text},
-			"delta": part,
+	f.events <- map[string]any{"type": "message.part.updated", "properties": map[string]any{
+		"part": map[string]any{"id": partID, "sessionID": f.session, "messageID": messageID, "type": "text", "text": ""},
+	}}
+	for _, delta := range []string{text[:1], text[1:]} {
+		f.events <- map[string]any{"type": "message.part.delta", "properties": map[string]any{
+			"sessionID": f.session, "messageID": messageID, "partID": partID, "field": "text", "delta": delta,
 		}}
 	}
+	f.events <- map[string]any{"type": "message.part.updated", "properties": map[string]any{
+		"part": map[string]any{"id": partID, "sessionID": f.session, "messageID": messageID, "type": "text", "text": text},
+	}}
 	f.events <- map[string]any{"type": "session.status", "properties": map[string]any{"sessionID": f.session, "status": map[string]any{"type": "idle"}}}
 }
 

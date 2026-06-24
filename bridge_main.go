@@ -404,6 +404,7 @@ func (s *server) consumeEvents(ctx context.Context, w http.ResponseWriter, input
 	}
 	assistantIDs := map[string]bool{}
 	seenParts := map[string]string{}
+	partTypes := map[string]string{}
 	answerStarted := false
 
 	for events.scanner.Scan() {
@@ -453,14 +454,18 @@ func (s *server) consumeEvents(ctx context.Context, w http.ResponseWriter, input
 			if stringValue(part["sessionID"]) != sessionID || !assistantIDs[stringValue(part["messageID"])] {
 				continue
 			}
-			switch stringValue(part["type"]) {
+			partID := stringValue(part["id"])
+			partType := stringValue(part["type"])
+			if partID != "" {
+				partTypes[partID] = partType
+			}
+			switch partType {
 			case "text":
 				delta := stringValue(props["delta"])
 				if delta == "" {
-					id := stringValue(part["id"])
 					text := stringValue(part["text"])
-					delta = strings.TrimPrefix(text, seenParts[id])
-					seenParts[id] = text
+					delta = strings.TrimPrefix(text, seenParts[partID])
+					seenParts[partID] = text
 				}
 				if delta != "" {
 					answerStarted = true
@@ -499,6 +504,24 @@ func (s *server) consumeEvents(ctx context.Context, w http.ResponseWriter, input
 					sw.done()
 				}
 				return result, nil
+			}
+		case "message.part.delta":
+			if stringValue(props["sessionID"]) != sessionID || !assistantIDs[stringValue(props["messageID"])] {
+				continue
+			}
+			partID := stringValue(props["partID"])
+			if partTypes[partID] != "text" || stringValue(props["field"]) != "text" {
+				continue
+			}
+			delta := stringValue(props["delta"])
+			if delta == "" {
+				continue
+			}
+			seenParts[partID] += delta
+			answerStarted = true
+			result.content += delta
+			if sw != nil {
+				sw.text(delta)
 			}
 		case "session.status":
 			if stringValue(props["sessionID"]) != sessionID {
