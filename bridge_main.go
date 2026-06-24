@@ -297,6 +297,9 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if input.Model == "" {
 		input.Model = s.cfg.defaultModel
 	}
+	if len(input.Tools) > 0 {
+		log.Printf("external tools offered: count=%d names=%s", len(input.Tools), strings.Join(toolNames(input.Tools, 16), ","))
+	}
 
 	s.chatMu.Lock()
 	defer s.chatMu.Unlock()
@@ -688,7 +691,7 @@ func (m *manager) startProcess(ctx context.Context) error {
 		"BUN_OPTIONS=--smol",
 		"MIMOCODE_SERVER_PASSWORD="+m.cfg.mimoPassword,
 		"XDG_CONFIG_HOME="+m.cfg.mimoConfigDir,
-		"MIMO_BRIDGE_TOOL_URL=http://"+m.cfg.host+":"+m.cfg.port+"/internal/tool/call",
+		"MIMO_BRIDGE_TOOL_URL="+internalToolURL(m.cfg.port),
 		"MIMO_BRIDGE_INTERNAL_KEY="+m.cfg.internalKey,
 	)
 	cmd.Stdout = os.Stderr
@@ -990,6 +993,7 @@ func (s *server) handleInternalTool(w http.ResponseWriter, r *http.Request) {
 	s.mgr.mu.Lock()
 	s.mgr.pending[callID] = pending
 	s.mgr.mu.Unlock()
+	log.Printf("external tool callback opened: call=%s name=%s", callID, input.Name)
 	select {
 	case s.mgr.pendingSig <- struct{}{}:
 	default:
@@ -1049,6 +1053,22 @@ func buildPrompt(input chatRequest, fullHistory bool) map[string]any {
 func externalToolsPrompt(tools []toolDefinition) string {
 	data, _ := json.Marshal(tools)
 	return "The external caller is the authoritative execution environment. Platform, working-directory, project-root, and device details supplied by this MiMo server describe only the remote bridge host; never present them as the caller's device and never use those paths for the caller's files. Do not use local filesystem, shell, memory, web, task, or workflow tools. For file, shell, or other actions, call the external tool with the exact offered tool name and a JSON-encoded arguments string. Do not claim an action succeeded unless the external tool result confirms it. Available external tool definitions:\n" + string(data)
+}
+
+func internalToolURL(port string) string {
+	return "http://127.0.0.1:" + port + "/internal/tool/call"
+}
+
+func toolNames(tools []toolDefinition, limit int) []string {
+	if limit > len(tools) {
+		limit = len(tools)
+	}
+	names := make([]string, 0, limit)
+	for _, item := range tools[:limit] {
+		name := strings.NewReplacer("\r", "", "\n", "").Replace(item.Function.Name)
+		names = append(names, name)
+	}
+	return names
 }
 
 func assistantMessage(result bridgeResult) chatMessage {

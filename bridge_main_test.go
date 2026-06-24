@@ -227,6 +227,12 @@ func TestChildEnvironmentUsesDedicatedProxy(t *testing.T) {
 	}
 }
 
+func TestInternalToolURLAlwaysUsesLoopback(t *testing.T) {
+	if got := internalToolURL("39173"); got != "http://127.0.0.1:39173/internal/tool/call" {
+		t.Fatalf("internal tool URL=%q", got)
+	}
+}
+
 func TestEnsureStartedDoesNotDuplicateLiveProcess(t *testing.T) {
 	mgr := &manager{
 		cfg:        config{mimoBin: "definitely-not-a-real-mimo-binary", mimoHost: "127.0.0.1", mimoPort: "1"},
