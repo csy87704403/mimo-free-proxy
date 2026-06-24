@@ -157,6 +157,22 @@ func TestChatRequestAcceptsFlattenedToolCall(t *testing.T) {
 	}
 }
 
+func TestInvalidJSONDetailsRedactsBodyContent(t *testing.T) {
+	body := []byte(`{"messages":[{"role":"tool","content":PowerShell command output}]}`)
+	var input chatRequest
+	err := json.Unmarshal(body, &input)
+	if err == nil {
+		t.Fatal("expected invalid JSON")
+	}
+	details := invalidJSONDetails(body, err)
+	if !strings.Contains(details, "syntax_offset=") || !strings.Contains(details, "inside_string=false") {
+		t.Fatalf("details=%q", details)
+	}
+	if strings.Contains(details, "PowerShell") || strings.Contains(details, "command") {
+		t.Fatalf("request content leaked: %q", details)
+	}
+}
+
 func TestChatCompletion(t *testing.T) {
 	fake := newFakeMimo(t)
 	_, handler := newBridgeForTest(t, fake)

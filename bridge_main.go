@@ -350,7 +350,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	var input chatRequest
 	if err := json.Unmarshal(body, &input); err != nil {
-		log.Printf("invalid chat request: bytes=%d error=%v", len(body), err)
+		log.Printf("invalid chat request: bytes=%d content_type=%q %s", len(body), r.Header.Get("Content-Type"), invalidJSONDetails(body, err))
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"message": "Invalid Chat Completions request"}})
 		return
 	}
@@ -396,6 +396,86 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeCompletion(w, input, result)
+}
+
+func invalidJSONDetails(body []byte, err error) string {
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		offset := int(syntaxErr.Offset)
+		index := offset - 1
+		badByte := -1
+		if index >= 0 && index < len(body) {
+			badByte = int(body[index])
+		}
+		return fmt.Sprintf("syntax_offset=%d/%d bad_byte=0x%02x inside_string=%t structure=%q", offset, len(body), badByte, jsonInsideString(body, index), sanitizedJSONWindow(body, index))
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		return fmt.Sprintf("type_offset=%d/%d field=%q value=%q target=%q", typeErr.Offset, len(body), typeErr.Field, typeErr.Value, typeErr.Type.String())
+	}
+	return fmt.Sprintf("error_type=%T error=%v", err, err)
+}
+
+func jsonInsideString(body []byte, end int) bool {
+	if end < 0 || end > len(body) {
+		return false
+	}
+	inString := false
+	escaped := false
+	for _, value := range body[:end] {
+		if !inString {
+			if value == '"' {
+				inString = true
+			}
+			continue
+		}
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch value {
+		case '\\':
+			escaped = true
+		case '"':
+			inString = false
+		}
+	}
+	return inString
+}
+
+func sanitizedJSONWindow(body []byte, center int) string {
+	if len(body) == 0 {
+		return ""
+	}
+	if center < 0 {
+		center = 0
+	}
+	start := center - 48
+	if start < 0 {
+		start = 0
+	}
+	end := center + 49
+	if end > len(body) {
+		end = len(body)
+	}
+	var result strings.Builder
+	for _, value := range body[start:end] {
+		switch {
+		case value == '\n':
+			result.WriteString(`\n`)
+		case value == '\r':
+			result.WriteString(`\r`)
+		case value == '\t':
+			result.WriteString(`\t`)
+		case value >= 'a' && value <= 'z', value >= 'A' && value <= 'Z', value >= '0' && value <= '9':
+			result.WriteByte('x')
+		case value >= 0x20 && value <= 0x7e:
+			result.WriteByte(value)
+		default:
+			result.WriteByte('.')
+		}
+	}
+	return result.String()
 }
 
 func (s *server) runChat(ctx context.Context, w http.ResponseWriter, input chatRequest) (bridgeResult, error) {
