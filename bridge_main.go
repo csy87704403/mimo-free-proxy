@@ -139,7 +139,7 @@ func main() {
 	if cfg.proxyAPIKey == "" {
 		log.Fatal("PROXY_API_KEY is required")
 	}
-	if err := installToolPlugin(cfg.mimoConfigDir); err != nil {
+	if err := installToolPlugin(cfg.mimoConfigDir, cfg.mimoProxyURL); err != nil {
 		log.Fatalf("install external tool: %v", err)
 	}
 
@@ -208,7 +208,7 @@ func defaultWorkdir() string {
 	return cwd
 }
 
-func installToolPlugin(configHome string) error {
+func installToolPlugin(configHome, proxyURL string) error {
 	data, err := assets.ReadFile("external-tool.ts")
 	if err != nil {
 		return err
@@ -227,10 +227,25 @@ func installToolPlugin(configHome string) error {
 	}
 	path := filepath.Join(dir, "external.ts")
 	current, _ := os.ReadFile(path)
-	if bytes.Equal(current, data) {
+	if !bytes.Equal(current, data) {
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			return err
+		}
+	}
+	pluginPackage := filepath.Join(root, "node_modules", "@mimo-ai", "plugin", "package.json")
+	if _, err := os.Stat(pluginPackage); err == nil {
 		return nil
 	}
-	return os.WriteFile(path, data, 0600)
+	npm, err := exec.LookPath("npm")
+	if err != nil {
+		return errors.New("@mimo-ai/plugin is missing and npm is not installed")
+	}
+	cmd := exec.Command(npm, "install", "--omit=dev", "--no-audit", "--no-fund")
+	cmd.Dir = root
+	cmd.Env = childEnvironment(proxyURL)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func (s *server) authorized(next http.HandlerFunc) http.HandlerFunc {
@@ -244,8 +259,11 @@ func (s *server) authorized(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	running := s.mgr.healthy(ctx)
+	cancel()
 	s.mgr.mu.Lock()
-	running := s.mgr.cmd != nil
+	running = running || s.mgr.cmd != nil
 	busy := s.mgr.busy
 	s.mgr.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -292,10 +310,7 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	result, err := s.runChat(r.Context(), w, input)
 	if err != nil {
 		if input.Stream {
-			if sw, ok := resultWriter(w, input.Model); ok {
-				sw.error(err)
-				sw.done()
-			}
+			writeStreamError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]string{"message": err.Error()}})
@@ -591,11 +606,25 @@ func (s *streamWriter) done() {
 	s.flusher.Flush()
 }
 
+func writeStreamError(w http.ResponseWriter, err error) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	data, _ := json.Marshal(map[string]any{"error": map[string]string{"message": err.Error()}})
+	_, _ = fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", data)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
 func (m *manager) ensureStarted(ctx context.Context) error {
 	if m.healthy(ctx) {
 		return nil
 	}
 	m.mu.Lock()
+	if m.cmd != nil {
+		m.mu.Unlock()
+		return nil
+	}
 	if m.starting != nil {
 		wait := m.starting
 		m.mu.Unlock()

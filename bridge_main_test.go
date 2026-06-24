@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -214,5 +215,16 @@ func TestChildEnvironmentUsesDedicatedProxy(t *testing.T) {
 	}
 	if strings.Contains(joined, "old-proxy") {
 		t.Fatal("inherited proxy was not replaced")
+	}
+}
+
+func TestEnsureStartedDoesNotDuplicateLiveProcess(t *testing.T) {
+	mgr := &manager{
+		cfg:        config{mimoBin: "definitely-not-a-real-mimo-binary", mimoHost: "127.0.0.1", mimoPort: "1"},
+		httpClient: &http.Client{},
+		cmd:        &exec.Cmd{},
+	}
+	if err := mgr.ensureStarted(context.Background()); err != nil {
+		t.Fatalf("existing process should prevent duplicate start: %v", err)
 	}
 }
