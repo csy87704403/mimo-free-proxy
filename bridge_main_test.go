@@ -121,6 +121,42 @@ func chatBody(stream bool) []byte {
 	return data
 }
 
+func TestChatRequestAcceptsObjectToolArguments(t *testing.T) {
+	body := []byte(`{
+		"model":"mimo-auto",
+		"messages":[
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_write","type":"function","function":{"name":"Write","arguments":{"file_path":"result.txt","content":"ok"}}}]},
+			{"role":"tool","tool_call_id":"call_write","content":"created"}
+		]
+	}`)
+	var input chatRequest
+	if err := json.Unmarshal(body, &input); err != nil {
+		t.Fatal(err)
+	}
+	got := input.Messages[0].ToolCalls[0].Function.Arguments
+	if got != `{"file_path":"result.txt","content":"ok"}` {
+		t.Fatalf("arguments=%q", got)
+	}
+}
+
+func TestChatRequestAcceptsFlattenedToolCall(t *testing.T) {
+	body := []byte(`{
+		"model":"mimo-auto",
+		"messages":[
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_write","type":"function","name":"Write","arguments":{"file_path":"result.txt"}}]},
+			{"role":"tool","tool_call_id":"call_write","content":[{"type":"text","text":"created"}]}
+		]
+	}`)
+	var input chatRequest
+	if err := json.Unmarshal(body, &input); err != nil {
+		t.Fatal(err)
+	}
+	call := input.Messages[0].ToolCalls[0]
+	if call.Function.Name != "Write" || call.Function.Arguments != `{"file_path":"result.txt"}` {
+		t.Fatalf("tool call=%#v", call)
+	}
+}
+
 func TestChatCompletion(t *testing.T) {
 	fake := newFakeMimo(t)
 	_, handler := newBridgeForTest(t, fake)

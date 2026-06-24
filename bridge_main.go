@@ -67,6 +67,62 @@ type functionCall struct {
 	Arguments string `json:"arguments"`
 }
 
+func (call *toolCall) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		ID        string          `json:"id"`
+		Type      string          `json:"type"`
+		Function  json.RawMessage `json:"function"`
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	call.ID = raw.ID
+	call.Type = raw.Type
+	if call.Type == "" {
+		call.Type = "function"
+	}
+	if len(raw.Function) > 0 && string(raw.Function) != "null" {
+		return json.Unmarshal(raw.Function, &call.Function)
+	}
+	call.Function.Name = raw.Name
+	return decodeFunctionArguments(raw.Arguments, &call.Function.Arguments)
+}
+
+func (call *functionCall) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	call.Name = raw.Name
+	return decodeFunctionArguments(raw.Arguments, &call.Arguments)
+}
+
+func decodeFunctionArguments(raw json.RawMessage, target *string) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		*target = ""
+		return nil
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		*target = text
+		return nil
+	}
+	if !json.Valid(raw) {
+		return errors.New("invalid tool call arguments")
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return err
+	}
+	*target = compact.String()
+	return nil
+}
+
 type toolDefinition struct {
 	Type     string       `json:"type"`
 	Function toolFunction `json:"function"`
@@ -293,7 +349,13 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input chatRequest
-	if err := json.Unmarshal(body, &input); err != nil || len(input.Messages) == 0 {
+	if err := json.Unmarshal(body, &input); err != nil {
+		log.Printf("invalid chat request: bytes=%d error=%v", len(body), err)
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"message": "Invalid Chat Completions request"}})
+		return
+	}
+	if len(input.Messages) == 0 {
+		log.Printf("invalid chat request: bytes=%d error=messages are required", len(body))
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"message": "Invalid Chat Completions request"}})
 		return
 	}
