@@ -574,6 +574,7 @@ func (s *server) consumeEvents(ctx context.Context, w http.ResponseWriter, input
 	seenParts := map[string]string{}
 	partTypes := map[string]string{}
 	answerStarted := false
+	invalidToolRecoveryUsed := false
 	done := make(chan struct{})
 	defer close(done)
 	lines := make(chan eventLine, 1)
@@ -751,6 +752,26 @@ func (s *server) consumeEvents(ctx context.Context, w http.ResponseWriter, input
 			if stringValue(props["sessionID"]) == sessionID {
 				return result, fmt.Errorf("mimo session error: %v", props["error"])
 			}
+		case "permission.asked":
+			if stringValue(props["sessionID"]) != sessionID {
+				continue
+			}
+			requestID := stringValue(props["id"])
+			permission := stringValue(props["permission"])
+			patterns := stringValues(props["patterns"])
+			if requestID == "" {
+				return result, errors.New("mimo permission request missing id")
+			}
+			if permission == "doom_loop" && len(patterns) == 1 && patterns[0] == "invalid" && !invalidToolRecoveryUsed {
+				if err := s.mgr.replyPermission(ctx, requestID, "once"); err != nil {
+					return result, err
+				}
+				invalidToolRecoveryUsed = true
+				log.Printf("approved one invalid-tool recovery: session=%s permission=%s", sessionID, requestID)
+				continue
+			}
+			_ = s.mgr.replyPermission(ctx, requestID, "reject")
+			return result, fmt.Errorf("mimo blocked repeated tool call: permission=%s patterns=%s", permission, strings.Join(patterns, ","))
 		}
 	}
 }
@@ -1014,6 +1035,10 @@ func (m *manager) promptAsync(ctx context.Context, sessionID, model string, prom
 
 func (m *manager) abortSession(ctx context.Context, sessionID string) error {
 	return m.doJSON(ctx, http.MethodPost, "/session/"+sessionID+"/abort", map[string]any{}, nil)
+}
+
+func (m *manager) replyPermission(ctx context.Context, requestID, reply string) error {
+	return m.doJSON(ctx, http.MethodPost, "/permission/"+requestID+"/reply", map[string]string{"reply": reply}, nil)
 }
 
 func (m *manager) request(ctx context.Context, method, path string, body any) (*http.Request, error) {
@@ -1368,7 +1393,21 @@ func imageExtension(mediaType string) string {
 
 func externalToolsPrompt(tools []toolDefinition) string {
 	data, _ := json.Marshal(tools)
-	return "The external caller is the authoritative execution environment. Platform, working-directory, project-root, and device details supplied by this MiMo server describe only the remote bridge host; never present them as the caller's device and never use or translate those paths for the caller's files. External tools already run in the caller's current working directory. When the user asks to work in the current directory, use relative paths only; use an absolute path only when the user explicitly supplied that caller-side path. Do not install software or packages unless the user explicitly requested installation. Do not use local filesystem, shell, memory, web, task, or workflow tools. For file, shell, or other actions, call the external tool with the exact offered tool name and a JSON-encoded arguments string. Do not claim an action succeeded unless the external tool result confirms it. Available external tool definitions:\n" + string(data)
+	return "The external caller is the authoritative execution environment. Platform, working-directory, project-root, and device details supplied by this MiMo server describe only the remote bridge host; never present them as the caller's device and never use or translate those paths for the caller's files. External tools already run in the caller's current working directory. When the user asks to work in the current directory, use relative paths only; use an absolute path only when the user explicitly supplied that caller-side path. Do not install software or packages unless the user explicitly requested installation. Do not use local filesystem, shell, memory, web, task, or workflow tools. The only native tool for caller-side actions is external. Never call an offered name such as Bash, Write, Read, or Edit as a native tool. Instead call external with the exact offered tool name in name and a JSON-encoded arguments string in arguments, including after every tool result. Do not claim an action succeeded unless the external tool result confirms it. Available external tool definitions:\n" + string(data)
+}
+
+func stringValues(value any) []string {
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if text := stringValue(item); text != "" {
+			result = append(result, text)
+		}
+	}
+	return result
 }
 
 func internalToolURL(port string) string {

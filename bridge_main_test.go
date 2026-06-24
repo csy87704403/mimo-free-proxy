@@ -20,12 +20,13 @@ type fakeMimo struct {
 	t       *testing.T
 	server  *httptest.Server
 	events  chan map[string]any
+	replies chan string
 	mu      sync.Mutex
 	session string
 }
 
 func newFakeMimo(t *testing.T) *fakeMimo {
-	f := &fakeMimo{t: t, events: make(chan map[string]any, 32), session: "ses_test"}
+	f := &fakeMimo{t: t, events: make(chan map[string]any, 32), replies: make(chan string, 4), session: "ses_test"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/global/health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"healthy": true})
@@ -63,6 +64,14 @@ func newFakeMimo(t *testing.T) *fakeMimo {
 		go f.emitText("OK")
 	})
 	mux.HandleFunc("/session/"+f.session+"/abort", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, true)
+	})
+	mux.HandleFunc("/permission/", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		f.replies <- body["reply"]
 		writeJSON(w, http.StatusOK, true)
 	})
 	f.server = httptest.NewServer(mux)
@@ -268,6 +277,36 @@ func TestToolCallbackDoesNotDependOnMimoPartEvent(t *testing.T) {
 	}
 	if result.toolCall == nil || result.toolCall.ID != "call_direct" || result.finish != "tool_calls" {
 		t.Fatalf("unexpected tool result: %#v", result)
+	}
+}
+
+func TestInvalidToolDoomLoopPermissionRecoversOnce(t *testing.T) {
+	fake := newFakeMimo(t)
+	srv, _ := newBridgeForTest(t, fake)
+	events, err := srv.mgr.openEvents(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer events.Close()
+
+	go func() {
+		fake.events <- map[string]any{"type": "permission.asked", "properties": map[string]any{
+			"id": "per_test", "sessionID": fake.session, "permission": "doom_loop", "patterns": []any{"invalid"},
+		}}
+		if reply := <-fake.replies; reply != "once" {
+			t.Errorf("permission reply=%q", reply)
+		}
+		fake.emitText("RECOVERED")
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := srv.consumeEvents(ctx, httptest.NewRecorder(), chatRequest{Model: "mimo-auto"}, events, fake.session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.content != "RECOVERED" {
+		t.Fatalf("content=%q", result.content)
 	}
 }
 
