@@ -258,6 +258,60 @@ func TestBuildPromptExternalTools(t *testing.T) {
 	}
 }
 
+func TestBuildPromptConvertsOpenAIImageURL(t *testing.T) {
+	content, _ := json.Marshal([]any{
+		map[string]any{"type": "text", "text": "read the code"},
+		map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,iVBORw0KGgo="}},
+	})
+	input := chatRequest{Messages: []chatMessage{{Role: "user", Content: content}}}
+	count, err := validateImageParts(input.Messages)
+	if err != nil || count != 1 {
+		t.Fatalf("image validation count=%d err=%v", count, err)
+	}
+	prompt := buildPrompt(input, false)
+	parts := prompt["parts"].([]any)
+	if len(parts) != 2 {
+		t.Fatalf("prompt parts=%#v", parts)
+	}
+	image := parts[1].(map[string]any)
+	if image["type"] != "file" || image["mime"] != "image/png" || image["filename"] != "image.png" {
+		t.Fatalf("image part=%#v", image)
+	}
+}
+
+func TestBuildPromptKeepsImagesInFullHistory(t *testing.T) {
+	content, _ := json.Marshal([]any{
+		map[string]any{"type": "text", "text": "describe"},
+		map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/sample.webp"}},
+	})
+	input := chatRequest{Messages: []chatMessage{
+		{Role: "user", Content: content},
+		{Role: "assistant", Content: json.RawMessage(`"a picture"`)},
+	}}
+	prompt := buildPrompt(input, true)
+	parts := prompt["parts"].([]any)
+	if len(parts) != 3 {
+		t.Fatalf("history parts=%#v", parts)
+	}
+	if got := parts[0].(map[string]any)["text"]; got != "USER:\ndescribe" {
+		t.Fatalf("history prefix=%q", got)
+	}
+	if got := parts[1].(map[string]any)["mime"]; got != "image/webp" {
+		t.Fatalf("history image MIME=%q", got)
+	}
+}
+
+func TestRejectsInvalidImageURL(t *testing.T) {
+	content, _ := json.Marshal([]any{
+		map[string]any{"type": "text", "text": "describe"},
+		map[string]any{"type": "image_url", "image_url": map[string]any{"url": "file:///tmp/image.png"}},
+	})
+	_, err := validateImageParts([]chatMessage{{Role: "user", Content: content}})
+	if err == nil || !strings.Contains(err.Error(), "HTTP(S)") {
+		t.Fatalf("invalid image error=%v", err)
+	}
+}
+
 func TestEventScannerHandlesSSE(t *testing.T) {
 	scanner := bufio.NewScanner(strings.NewReader("data: {}\n\n"))
 	if !scanner.Scan() {

@@ -15,8 +15,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -297,6 +299,14 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Model == "" {
 		input.Model = s.cfg.defaultModel
+	}
+	imageCount, err := validateImageParts(input.Messages)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"message": err.Error()}})
+		return
+	}
+	if imageCount > 0 {
+		log.Printf("multimodal images received: count=%d", imageCount)
 	}
 	if len(input.Tools) > 0 {
 		log.Printf("external tools offered: count=%d names=%s", len(input.Tools), strings.Join(toolNames(input.Tools, 16), ","))
@@ -1058,18 +1068,29 @@ func buildPrompt(input chatRequest, fullHistory bool) map[string]any {
 	if len(input.Tools) > 0 {
 		system = append(system, externalToolsPrompt(input.Tools))
 	}
-	var text string
+	var parts []any
 	if fullHistory {
-		parts := []string{}
 		for _, message := range input.Messages {
 			if message.Role == "system" || message.Role == "developer" {
 				continue
 			}
-			parts = append(parts, strings.ToUpper(message.Role)+":\n"+messageText(message))
+			messageParts, _ := messagePromptParts(message)
+			if len(messageParts) == 0 {
+				continue
+			}
+			prefix := strings.ToUpper(message.Role) + ":\n"
+			if first, ok := messageParts[0].(map[string]any); ok && stringValue(first["type"]) == "text" {
+				first["text"] = prefix + stringValue(first["text"])
+			} else {
+				parts = append(parts, map[string]any{"type": "text", "text": prefix})
+			}
+			parts = append(parts, messageParts...)
 		}
-		text = strings.Join(parts, "\n\n")
 	} else {
-		text = messageText(input.Messages[len(input.Messages)-1])
+		parts, _ = messagePromptParts(input.Messages[len(input.Messages)-1])
+	}
+	if len(parts) == 0 {
+		parts = []any{map[string]any{"type": "text", "text": ""}}
 	}
 	toolFlags := map[string]bool{
 		"bash": false, "read": false, "glob": false, "grep": false, "edit": false, "write": false,
@@ -1079,7 +1100,127 @@ func buildPrompt(input chatRequest, fullHistory bool) map[string]any {
 	return map[string]any{
 		"system": strings.Join(system, "\n\n"),
 		"tools":  toolFlags,
-		"parts":  []any{map[string]any{"type": "text", "text": text}},
+		"parts":  parts,
+	}
+}
+
+func validateImageParts(messages []chatMessage) (int, error) {
+	count := 0
+	for _, message := range messages {
+		if message.Role == "system" || message.Role == "developer" {
+			continue
+		}
+		parts, err := messagePromptParts(message)
+		if err != nil {
+			return 0, err
+		}
+		for _, item := range parts {
+			part, _ := item.(map[string]any)
+			if stringValue(part["type"]) == "file" {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
+func messagePromptParts(message chatMessage) ([]any, error) {
+	if len(message.Content) == 0 || string(message.Content) == "null" {
+		return nil, nil
+	}
+	var text string
+	if json.Unmarshal(message.Content, &text) == nil {
+		return []any{map[string]any{"type": "text", "text": text}}, nil
+	}
+	var content []map[string]any
+	if json.Unmarshal(message.Content, &content) != nil {
+		return []any{map[string]any{"type": "text", "text": string(message.Content)}}, nil
+	}
+	parts := make([]any, 0, len(content))
+	for _, item := range content {
+		switch stringValue(item["type"]) {
+		case "text":
+			parts = append(parts, map[string]any{"type": "text", "text": stringValue(item["text"])})
+		case "image_url":
+			imageURL := ""
+			switch value := item["image_url"].(type) {
+			case string:
+				imageURL = value
+			case map[string]any:
+				imageURL = stringValue(value["url"])
+			}
+			mimeType, filename, err := imagePartInfo(imageURL)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, map[string]any{"type": "file", "mime": mimeType, "filename": filename, "url": imageURL})
+		}
+	}
+	return parts, nil
+}
+
+func imagePartInfo(rawURL string) (string, string, error) {
+	if rawURL == "" {
+		return "", "", errors.New("image_url.url is required")
+	}
+	if strings.HasPrefix(strings.ToLower(rawURL), "data:") {
+		comma := strings.IndexByte(rawURL, ',')
+		if comma < 0 || comma == len(rawURL)-1 {
+			return "", "", errors.New("image_url contains an invalid data URL")
+		}
+		meta := rawURL[len("data:"):comma]
+		mediaType := strings.ToLower(strings.SplitN(meta, ";", 2)[0])
+		if !strings.HasPrefix(mediaType, "image/") {
+			return "", "", errors.New("image_url data URL must contain an image MIME type")
+		}
+		if !strings.Contains(strings.ToLower(meta), ";base64") {
+			return "", "", errors.New("image_url data URL must use base64 encoding")
+		}
+		return mediaType, "image" + imageExtension(mediaType), nil
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", "", errors.New("image_url must be an HTTP(S) URL or a base64 data URL")
+	}
+	ext := strings.ToLower(path.Ext(parsed.Path))
+	mediaType := imageMIMEFromExtension(ext)
+	if mediaType == "" {
+		return "", "", errors.New("remote image_url must end in .png, .jpg, .jpeg, .webp, or .gif")
+	}
+	filename := path.Base(parsed.Path)
+	if filename == "." || filename == "/" || filename == "" {
+		filename = "image" + ext
+	}
+	return mediaType, filename, nil
+}
+
+func imageMIMEFromExtension(ext string) string {
+	switch ext {
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".webp":
+		return "image/webp"
+	case ".gif":
+		return "image/gif"
+	default:
+		return ""
+	}
+}
+
+func imageExtension(mediaType string) string {
+	switch strings.ToLower(mediaType) {
+	case "image/png":
+		return ".png"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	default:
+		return ""
 	}
 }
 
