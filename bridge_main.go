@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -32,21 +33,26 @@ const maxBodyBytes = 20 * 1024 * 1024
 var assets embed.FS
 
 type config struct {
-	host          string
-	port          string
-	proxyAPIKey   string
-	defaultModel  string
-	mimoBin       string
-	mimoHost      string
-	mimoPort      string
-	mimoUsername  string
-	mimoPassword  string
-	mimoWorkdir   string
-	mimoConfigDir string
-	mimoProxyURL  string
-	idleTimeout   time.Duration
-	startTimeout  time.Duration
-	internalKey   string
+	host              string
+	port              string
+	proxyAPIKey       string
+	defaultModel      string
+	mimoBin           string
+	mimoHost          string
+	mimoPort          string
+	mimoUsername      string
+	mimoPassword      string
+	mimoWorkdir       string
+	mimoConfigDir     string
+	mimoProxyURL      string
+	idleTimeout       time.Duration
+	startTimeout      time.Duration
+	healthIPURL       string
+	healthUpstreamURL string
+	healthExpectedIP  string
+	healthTimeout     time.Duration
+	healthCacheTTL    time.Duration
+	internalKey       string
 }
 
 type chatMessage struct {
@@ -156,24 +162,52 @@ type pendingTool struct {
 }
 
 type manager struct {
-	cfg        config
-	httpClient *http.Client
-	mu         sync.Mutex
-	cmd        *exec.Cmd
-	starting   chan struct{}
-	startErr   error
-	busy       int
-	lastUsed   time.Time
-	sessions   map[string]string
-	pending    map[string]*pendingTool
-	pendingSig chan struct{}
+	cfg             config
+	httpClient      *http.Client
+	mu              sync.Mutex
+	cmd             *exec.Cmd
+	starting        chan struct{}
+	startErr        error
+	busy            int
+	lastUsed        time.Time
+	sessions        map[string]string
+	pending         map[string]*pendingTool
+	pendingSig      chan struct{}
+	chatTotal       int64
+	chatSuccess     int64
+	chatFailure     int64
+	lastChatStarted time.Time
+	lastChatSuccess time.Time
+	lastChatFailure time.Time
+	lastChatLatency time.Duration
+	lastChatError   string
 }
 
 type server struct {
-	cfg     config
-	mgr     *manager
-	chatMu  sync.Mutex
-	started time.Time
+	cfg           config
+	mgr           *manager
+	chatMu        sync.Mutex
+	started       time.Time
+	healthMu      sync.Mutex
+	healthCacheAt time.Time
+	healthCache   map[string]any
+}
+
+type managerStatus struct {
+	processRunning  bool
+	starting        bool
+	busy            int
+	lastUsed        time.Time
+	sessions        int
+	pendingTools    int
+	chatTotal       int64
+	chatSuccess     int64
+	chatFailure     int64
+	lastChatStarted time.Time
+	lastChatSuccess time.Time
+	lastChatFailure time.Time
+	lastChatLatency time.Duration
+	lastChatError   string
 }
 
 type bridgeResult struct {
@@ -215,6 +249,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", srv.handleHealth)
+	mux.HandleFunc("/health/details", srv.authorized(srv.handleHealthDetails))
 	mux.HandleFunc("/v1/models", srv.authorized(srv.handleModels))
 	mux.HandleFunc("/models", srv.authorized(srv.handleModels))
 	mux.HandleFunc("/v1/chat/completions", srv.authorized(srv.handleChat))
@@ -241,21 +276,26 @@ func loadConfig() config {
 	workdir := env("MIMO_WORKDIR", defaultWorkdir())
 	configDir := env("MIMO_CONFIG_HOME", filepath.Join(workdir, ".mimo-bridge-config"))
 	return config{
-		host:          env("HOST", "127.0.0.1"),
-		port:          env("PORT", "39173"),
-		proxyAPIKey:   os.Getenv("PROXY_API_KEY"),
-		defaultModel:  env("DEFAULT_MODEL", "mimo-auto"),
-		mimoBin:       env("MIMO_BIN", "mimo"),
-		mimoHost:      "127.0.0.1",
-		mimoPort:      env("MIMO_PORT", "39450"),
-		mimoUsername:  env("MIMO_SERVER_USERNAME", "mimocode"),
-		mimoPassword:  password,
-		mimoWorkdir:   workdir,
-		mimoConfigDir: configDir,
-		mimoProxyURL:  strings.TrimSpace(os.Getenv("MIMO_PROXY_URL")),
-		idleTimeout:   durationEnv("MIMO_IDLE_TIMEOUT", 15*time.Minute),
-		startTimeout:  durationEnv("MIMO_START_TIMEOUT", 25*time.Second),
-		internalKey:   internalKey,
+		host:              env("HOST", "127.0.0.1"),
+		port:              env("PORT", "39173"),
+		proxyAPIKey:       os.Getenv("PROXY_API_KEY"),
+		defaultModel:      env("DEFAULT_MODEL", "mimo-auto"),
+		mimoBin:           env("MIMO_BIN", "mimo"),
+		mimoHost:          "127.0.0.1",
+		mimoPort:          env("MIMO_PORT", "39450"),
+		mimoUsername:      env("MIMO_SERVER_USERNAME", "mimocode"),
+		mimoPassword:      password,
+		mimoWorkdir:       workdir,
+		mimoConfigDir:     configDir,
+		mimoProxyURL:      strings.TrimSpace(os.Getenv("MIMO_PROXY_URL")),
+		idleTimeout:       durationEnv("MIMO_IDLE_TIMEOUT", 15*time.Minute),
+		startTimeout:      durationEnv("MIMO_START_TIMEOUT", 25*time.Second),
+		healthIPURL:       env("HEALTH_IP_URL", "https://api.ipify.org?format=json"),
+		healthUpstreamURL: env("HEALTH_UPSTREAM_URL", "https://api.xiaomimimo.com/"),
+		healthExpectedIP:  strings.TrimSpace(os.Getenv("HEALTH_EXPECTED_EXIT_IP")),
+		healthTimeout:     durationEnv("HEALTH_CHECK_TIMEOUT", 8*time.Second),
+		healthCacheTTL:    durationEnv("HEALTH_CACHE_TTL", time.Minute),
+		internalKey:       internalKey,
 	}
 }
 
@@ -317,18 +357,261 @@ func (s *server) authorized(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (s *server) handleHealth(w http.ResponseWriter, _ *http.Request) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	running := s.mgr.healthy(ctx)
-	cancel()
-	s.mgr.mu.Lock()
-	running = running || s.mgr.cmd != nil
-	busy := s.mgr.busy
-	s.mgr.mu.Unlock()
+func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	status := s.mgr.status()
+	localHealthy := false
+	if status.processRunning {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		localHealthy = s.mgr.healthy(ctx)
+		cancel()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok": true, "mimo_running": running, "busy": busy,
+		"ok":             true,
+		"status":         "running",
+		"mimo_state":     mimoState(status, localHealthy),
+		"mimo_running":   status.processRunning,
+		"busy":           status.busy,
 		"uptime_seconds": int(time.Since(s.started).Seconds()),
 	})
+}
+
+func (s *server) handleHealthDetails(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return
+	}
+	status := s.mgr.status()
+	localHealthy := false
+	if status.processRunning {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		localHealthy = s.mgr.healthy(ctx)
+		cancel()
+	}
+	network := s.networkHealth(r.Context(), r.URL.Query().Get("refresh") == "1")
+	proxy, _ := network["proxy"].(map[string]any)
+	upstream, _ := network["upstream"].(map[string]any)
+	networkOK := boolValue(proxy["ok"]) && boolValue(upstream["ok"])
+	mimoOK := !status.processRunning || localHealthy
+	ok := networkOK && mimoOK
+	overall := "healthy"
+	if !ok {
+		overall = "degraded"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         ok,
+		"status":     overall,
+		"checked_at": time.Now().UTC().Format(time.RFC3339),
+		"service": map[string]any{
+			"running":        true,
+			"uptime_seconds": int(time.Since(s.started).Seconds()),
+			"model":          s.cfg.defaultModel,
+		},
+		"mimo": map[string]any{
+			"state":             mimoState(status, localHealthy),
+			"on_demand":         true,
+			"process_running":   status.processRunning,
+			"local_api_healthy": localHealthy,
+			"last_used_at":      timeValue(status.lastUsed),
+			"sessions_cached":   status.sessions,
+			"pending_tools":     status.pendingTools,
+		},
+		"network": network,
+		"activity": map[string]any{
+			"active_requests":     status.busy,
+			"total_requests":      status.chatTotal,
+			"successful_requests": status.chatSuccess,
+			"failed_requests":     status.chatFailure,
+			"last_request_at":     timeValue(status.lastChatStarted),
+			"last_success_at":     timeValue(status.lastChatSuccess),
+			"last_failure_at":     timeValue(status.lastChatFailure),
+			"last_latency_ms":     status.lastChatLatency.Milliseconds(),
+			"last_error":          status.lastChatError,
+			"last_chat_status":    lastChatStatus(status),
+		},
+	})
+}
+
+func mimoState(status managerStatus, localHealthy bool) string {
+	if status.starting {
+		return "starting"
+	}
+	if !status.processRunning {
+		return "idle"
+	}
+	if localHealthy {
+		return "ready"
+	}
+	return "unhealthy"
+}
+
+func lastChatStatus(status managerStatus) string {
+	if status.lastChatSuccess.IsZero() && status.lastChatFailure.IsZero() {
+		return "unknown"
+	}
+	if status.lastChatFailure.After(status.lastChatSuccess) {
+		return "failed"
+	}
+	return "successful"
+}
+
+func timeValue(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func boolValue(value any) bool {
+	result, _ := value.(bool)
+	return result
+}
+
+func (s *server) networkHealth(ctx context.Context, force bool) map[string]any {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	if !force && s.healthCache != nil && time.Since(s.healthCacheAt) < s.cfg.healthCacheTTL {
+		return s.healthCache
+	}
+	client, err := healthHTTPClient(s.cfg.mimoProxyURL, s.cfg.healthTimeout)
+	if err != nil {
+		failure := map[string]any{"ok": false, "error": err.Error()}
+		now := time.Now()
+		s.healthCacheAt = now
+		s.healthCache = map[string]any{
+			"checked_at": now.UTC().Format(time.RFC3339),
+			"proxy":      failure,
+			"upstream":   failure,
+		}
+		return s.healthCache
+	}
+	var proxy, upstream map[string]any
+	var wait sync.WaitGroup
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		proxy = checkExitIP(ctx, client, s.cfg.healthIPURL, s.cfg.healthExpectedIP, healthProxyMode(s.cfg.mimoProxyURL))
+	}()
+	go func() {
+		defer wait.Done()
+		upstream = checkUpstream(ctx, client, s.cfg.healthUpstreamURL)
+	}()
+	wait.Wait()
+	now := time.Now()
+	s.healthCacheAt = now
+	s.healthCache = map[string]any{
+		"checked_at": now.UTC().Format(time.RFC3339),
+		"expires_at": now.Add(s.cfg.healthCacheTTL).UTC().Format(time.RFC3339),
+		"proxy":      proxy,
+		"upstream":   upstream,
+	}
+	return s.healthCache
+}
+
+func healthHTTPClient(proxyURL string, timeout time.Duration) (*http.Client, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if proxyURL != "" {
+		parsed, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid MIMO_PROXY_URL: %w", err)
+		}
+		transport.Proxy = http.ProxyURL(parsed)
+	}
+	return &http.Client{Transport: transport, Timeout: timeout}, nil
+}
+
+func healthProxyMode(proxyURL string) string {
+	if proxyURL != "" {
+		return "explicit_proxy"
+	}
+	for _, key := range []string{"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"} {
+		if strings.TrimSpace(os.Getenv(key)) != "" {
+			return "environment_proxy"
+		}
+	}
+	return "direct"
+}
+
+func checkExitIP(ctx context.Context, client *http.Client, endpoint, expected, mode string) map[string]any {
+	started := time.Now()
+	result := map[string]any{
+		"ok":               false,
+		"mode":             mode,
+		"proxy_configured": mode != "direct",
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		result["error"] = err.Error()
+		return result
+	}
+	req.Header.Set("User-Agent", "mimo-native-bridge-health/1.0")
+	resp, err := client.Do(req)
+	result["latency_ms"] = time.Since(started).Milliseconds()
+	if err != nil {
+		result["error"] = compactHealthError(err)
+		return result
+	}
+	defer resp.Body.Close()
+	result["http_status"] = resp.StatusCode
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		result["error"] = fmt.Sprintf("exit IP service returned HTTP %d", resp.StatusCode)
+		return result
+	}
+	var payload struct {
+		IP string `json:"ip"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&payload); err != nil {
+		result["error"] = "exit IP service returned invalid JSON"
+		return result
+	}
+	if net.ParseIP(payload.IP) == nil {
+		result["error"] = "exit IP service returned an invalid address"
+		return result
+	}
+	result["exit_ip"] = payload.IP
+	if expected != "" {
+		matches := payload.IP == expected
+		result["expected_ip"] = expected
+		result["matches_expected"] = matches
+		if !matches {
+			result["error"] = "exit IP does not match HEALTH_EXPECTED_EXIT_IP"
+			return result
+		}
+	}
+	result["ok"] = true
+	return result
+}
+
+func checkUpstream(ctx context.Context, client *http.Client, endpoint string) map[string]any {
+	started := time.Now()
+	result := map[string]any{"ok": false}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, endpoint, nil)
+	if err != nil {
+		result["error"] = err.Error()
+		return result
+	}
+	req.Header.Set("User-Agent", "mimo-native-bridge-health/1.0")
+	resp, err := client.Do(req)
+	result["latency_ms"] = time.Since(started).Milliseconds()
+	if err != nil {
+		result["error"] = compactHealthError(err)
+		return result
+	}
+	defer resp.Body.Close()
+	result["ok"] = true
+	result["http_status"] = resp.StatusCode
+	return result
+}
+
+func compactHealthError(err error) string {
+	text := strings.Join(strings.Fields(err.Error()), " ")
+	if len(text) > 240 {
+		text = text[:240]
+	}
+	return text
 }
 
 func (s *server) handleModels(w http.ResponseWriter, _ *http.Request) {
@@ -374,16 +657,20 @@ func (s *server) handleChat(w http.ResponseWriter, r *http.Request) {
 		log.Printf("external tools offered: count=%d names=%s", len(input.Tools), strings.Join(toolNames(input.Tools, 16), ","))
 	}
 
+	requestStarted := time.Now()
+	s.mgr.recordChatStarted(requestStarted)
 	s.chatMu.Lock()
 	defer s.chatMu.Unlock()
 	s.mgr.markBusy(true)
 	defer s.mgr.markBusy(false)
 	if err := s.mgr.ensureStarted(r.Context()); err != nil {
+		s.mgr.recordChatFinished(requestStarted, err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"message": err.Error()}})
 		return
 	}
 
 	result, err := s.runChat(r.Context(), w, input)
+	s.mgr.recordChatFinished(requestStarted, err)
 	if err != nil {
 		if input.Stream {
 			writeStreamError(w, err)
@@ -1092,6 +1379,49 @@ func (m *manager) markBusy(active bool) {
 	}
 	m.lastUsed = time.Now()
 	m.mu.Unlock()
+}
+
+func (m *manager) recordChatStarted(started time.Time) {
+	m.mu.Lock()
+	m.chatTotal++
+	m.lastChatStarted = started
+	m.mu.Unlock()
+}
+
+func (m *manager) recordChatFinished(started time.Time, err error) {
+	m.mu.Lock()
+	m.lastChatLatency = time.Since(started)
+	if err == nil {
+		m.chatSuccess++
+		m.lastChatSuccess = time.Now()
+		m.lastChatError = ""
+	} else {
+		m.chatFailure++
+		m.lastChatFailure = time.Now()
+		m.lastChatError = compactHealthError(err)
+	}
+	m.mu.Unlock()
+}
+
+func (m *manager) status() managerStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return managerStatus{
+		processRunning:  m.cmd != nil,
+		starting:        m.starting != nil,
+		busy:            m.busy,
+		lastUsed:        m.lastUsed,
+		sessions:        len(m.sessions),
+		pendingTools:    len(m.pending),
+		chatTotal:       m.chatTotal,
+		chatSuccess:     m.chatSuccess,
+		chatFailure:     m.chatFailure,
+		lastChatStarted: m.lastChatStarted,
+		lastChatSuccess: m.lastChatSuccess,
+		lastChatFailure: m.lastChatFailure,
+		lastChatLatency: m.lastChatLatency,
+		lastChatError:   m.lastChatError,
+	}
 }
 
 func (m *manager) idleLoop() {

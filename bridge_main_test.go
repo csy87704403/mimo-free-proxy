@@ -130,6 +130,106 @@ func chatBody(stream bool) []byte {
 	return data
 }
 
+func TestBasicHealthIsPublicAndRedacted(t *testing.T) {
+	fake := newFakeMimo(t)
+	srv, _ := newBridgeForTest(t, fake)
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	rec := httptest.NewRecorder()
+	srv.handleHealth(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["status"] != "running" || response["mimo_state"] != "idle" {
+		t.Fatalf("health=%#v", response)
+	}
+	if _, exists := response["network"]; exists || strings.Contains(rec.Body.String(), "exit_ip") {
+		t.Fatalf("basic health exposed network details: %s", rec.Body.String())
+	}
+}
+
+func TestDetailedHealthRequiresAuthorization(t *testing.T) {
+	fake := newFakeMimo(t)
+	srv, _ := newBridgeForTest(t, fake)
+	req := httptest.NewRequest(http.MethodGet, "/health/details", nil)
+	rec := httptest.NewRecorder()
+	srv.authorized(srv.handleHealthDetails)(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDetailedHealthChecksNetworkAndCachesResult(t *testing.T) {
+	var mu sync.Mutex
+	ipHits := 0
+	upstreamHits := 0
+	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/ip":
+			ipHits++
+			writeJSON(w, http.StatusOK, map[string]string{"ip": "203.0.113.10"})
+		case "/upstream":
+			upstreamHits++
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer probe.Close()
+
+	fake := newFakeMimo(t)
+	srv, _ := newBridgeForTest(t, fake)
+	srv.cfg.healthIPURL = probe.URL + "/ip"
+	srv.cfg.healthUpstreamURL = probe.URL + "/upstream"
+	srv.cfg.healthExpectedIP = "203.0.113.10"
+	srv.cfg.healthTimeout = time.Second
+	srv.cfg.healthCacheTTL = time.Minute
+	srv.mgr.recordChatStarted(time.Now().Add(-20 * time.Millisecond))
+	srv.mgr.recordChatFinished(time.Now().Add(-20*time.Millisecond), nil)
+
+	request := func(target string) map[string]any {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("Authorization", "Bearer test-key")
+		rec := httptest.NewRecorder()
+		srv.authorized(srv.handleHealthDetails)(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var response map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+
+	response := request("/health/details")
+	if response["ok"] != true || response["status"] != "healthy" {
+		t.Fatalf("health=%#v", response)
+	}
+	network := response["network"].(map[string]any)
+	proxy := network["proxy"].(map[string]any)
+	upstream := network["upstream"].(map[string]any)
+	if proxy["exit_ip"] != "203.0.113.10" || proxy["matches_expected"] != true || upstream["ok"] != true {
+		t.Fatalf("network=%#v", network)
+	}
+	activity := response["activity"].(map[string]any)
+	if activity["total_requests"] != float64(1) || activity["last_chat_status"] != "successful" {
+		t.Fatalf("activity=%#v", activity)
+	}
+
+	request("/health/details")
+	mu.Lock()
+	defer mu.Unlock()
+	if ipHits != 1 || upstreamHits != 1 {
+		t.Fatalf("health cache missed: ip=%d upstream=%d", ipHits, upstreamHits)
+	}
+}
+
 func TestChatRequestAcceptsObjectToolArguments(t *testing.T) {
 	body := []byte(`{
 		"model":"mimo-auto",
