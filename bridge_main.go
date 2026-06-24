@@ -335,6 +335,7 @@ func (s *server) runChat(ctx context.Context, w http.ResponseWriter, input chatR
 		defer events.Close()
 		select {
 		case pending.result <- output:
+			log.Printf("external tool result received: call=%s name=%s bytes=%d", callID, pending.name, len(output))
 		case <-ctx.Done():
 			return bridgeResult{}, ctx.Err()
 		}
@@ -497,6 +498,7 @@ func (s *server) consumeEvents(ctx context.Context, w http.ResponseWriter, input
 				call := &toolCall{ID: callID, Type: "function", Function: functionCall{Name: name, Arguments: normalizeArguments(arguments)}}
 				result.toolCall = call
 				answerStarted = true
+				log.Printf("external tool requested: call=%s name=%s", callID, name)
 				result.finish = "tool_calls"
 				if sw != nil {
 					sw.tool(*call)
@@ -1046,7 +1048,7 @@ func buildPrompt(input chatRequest, fullHistory bool) map[string]any {
 
 func externalToolsPrompt(tools []toolDefinition) string {
 	data, _ := json.Marshal(tools)
-	return "The caller provides external tools. Do not use local filesystem, shell, memory, web, task, or workflow tools. When a tool is needed, call the external tool with the exact tool name and a JSON-encoded arguments string. Available external tool definitions:\n" + string(data)
+	return "The external caller is the authoritative execution environment. Platform, working-directory, project-root, and device details supplied by this MiMo server describe only the remote bridge host; never present them as the caller's device and never use those paths for the caller's files. Do not use local filesystem, shell, memory, web, task, or workflow tools. For file, shell, or other actions, call the external tool with the exact offered tool name and a JSON-encoded arguments string. Do not claim an action succeeded unless the external tool result confirms it. Available external tool definitions:\n" + string(data)
 }
 
 func assistantMessage(result bridgeResult) chatMessage {

@@ -197,6 +197,9 @@ func TestBuildPromptExternalTools(t *testing.T) {
 	if !strings.Contains(prompt["system"].(string), `"name":"bash"`) {
 		t.Fatal("external tool schema missing from system prompt")
 	}
+	if !strings.Contains(prompt["system"].(string), "remote bridge host") {
+		t.Fatal("external execution environment guidance missing from system prompt")
+	}
 }
 
 func TestEventScannerHandlesSSE(t *testing.T) {
